@@ -11,6 +11,11 @@
  * 每張訂單會寫入兩個分頁：
  * - 訂單：一張單一列（同一個訂單編號再次送出會覆蓋舊資料）
  * - 明細：每個款色尺寸一列（連鎖分店會分店分開列）
+ *
+ * 刪除／作廢訂單：
+ * - 直接刪掉「訂單」分頁裡那一列（明細可一起刪），或把「狀態」改成「作廢」
+ * - 之後客人就算從「我的訂單」修改再送出，也不會再寫進來，網頁會請客人重新下新單
+ * - 隱藏分頁「_紀錄」記錄收過的訂單編號，請不要刪除
  */
 
 const ORDER_HEAD = ['送出時間', '訂單編號', '經銷商／店名', '聯絡人', '電話', 'Email', '訂單備註', '款色數', '件數', '零售金額', '分店數', '分店', '狀態'];
@@ -29,6 +34,12 @@ function doPost(e) {
     const ss = SpreadsheetApp.getActiveSpreadsheet();
     const os = sheet_(ss, '訂單', ORDER_HEAD);
     const ls = sheet_(ss, '明細', LINE_HEAD);
+    const log = logSheet_(ss);
+    const seen = log.getLastRow() > 0 && log.getRange(1, 1, log.getLastRow(), 1).getValues().some(r => String(r[0]) === String(d.oid));
+    const row = findOid_(os, d.oid);
+    if (row && String(os.getRange(row, ORDER_HEAD.indexOf('狀態') + 1).getValue()).trim() === '作廢') return out_('void');
+    if (seen && !row) return out_('deleted');
+    if (!seen) log.appendRow([d.oid, new Date()]);
     removeOid_(os, d.oid);
     removeOid_(ls, d.oid);
 
@@ -67,6 +78,20 @@ function sheet_(ss, name, head) {
     sh.setFrozenRows(1);
   }
   return sh;
+}
+
+function logSheet_(ss) {
+  let sh = ss.getSheetByName('_紀錄');
+  if (!sh) { sh = ss.insertSheet('_紀錄'); sh.hideSheet(); }
+  return sh;
+}
+
+function findOid_(sh, oid) {
+  const n = sh.getLastRow();
+  if (n < 2) return 0;
+  const ids = sh.getRange(2, 2, n - 1, 1).getValues();
+  for (let i = 0; i < ids.length; i++) if (String(ids[i][0]) === String(oid)) return i + 2;
+  return 0;
 }
 
 function removeOid_(sh, oid) {

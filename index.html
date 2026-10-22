@@ -344,8 +344,10 @@ tfoot td{font-weight:700;background:var(--sunk)}
   let dev=null; try{ dev=localStorage.getItem('sdr-dev'); if(!dev){ dev='d'+Math.random().toString(36).slice(2,10); localStorage.setItem('sdr-dev',dev); } }catch(e){ dev='d'+Math.random().toString(36).slice(2,10); }
   const hist=()=>{ try{ return JSON.parse(localStorage.getItem(HKEY)||'[]'); }catch(e){ return []; } };
   const subs=[]; const emit=()=>{ const docs=hist().sort((a,b)=>String(b.submittedAt).localeCompare(String(a.submittedAt))).map(d=>({id:d.oid,exists:true,data:()=>d})); subs.forEach(f=>f({docs,size:docs.length,empty:!docs.length,docChanges:()=>[],metadata:{fromCache:false,hasPendingWrites:false}})); };
-  async function post(body){ await fetch(URL_,{method:'POST',mode:'no-cors',headers:{'Content-Type':'text/plain;charset=utf-8'},body:JSON.stringify(body)}); }
-  const db={ doc(path){ const p=path.split('/'); return { async set(body){ if(p.length===4&&p[2]==='subs'){ await post(body); const h=hist().filter(x=>x.oid!==body.oid); h.push(body); try{ localStorage.setItem(HKEY,JSON.stringify(h)); }catch(e){} emit(); } }, async update(){}, async get(){ return {exists:false,data:()=>undefined}; } }; },
+  async function post(body){ const opt={method:'POST',headers:{'Content-Type':'text/plain;charset=utf-8'},body:JSON.stringify(body)};
+    try{ const r=await fetch(URL_,{...opt,redirect:'follow'}); return (await r.text()).trim(); }
+    catch(e){ await fetch(URL_,{...opt,mode:'no-cors'}); return 'ok'; } }
+  const db={ doc(path){ const p=path.split('/'); return { async set(body){ if(p.length===4&&p[2]==='subs'){ const res=await post(body); if(res==='deleted'||res==='void'){ try{ localStorage.setItem(HKEY,JSON.stringify(hist().filter(x=>x.oid!==body.oid))); }catch(e){} emit(); const err=new Error('order_closed'); err.code='order_closed'; throw err; } if(res&&res!=='ok'&&!/<html/i.test(res)) { const err=new Error(res); err.code='server'; throw err; } const h=hist().filter(x=>x.oid!==body.oid); h.push(body); try{ localStorage.setItem(HKEY,JSON.stringify(h)); }catch(e){} emit(); } }, async update(){}, async get(){ return {exists:false,data:()=>undefined}; } }; },
     collection(){ const q={ orderBy(){ return q; }, limit(){ return q; }, where(){ return q; }, onSnapshot(next){ subs.push(next); setTimeout(emit,0); return ()=>{ const i=subs.indexOf(next); if(i>=0) subs.splice(i,1); }; }, async get(){ return {docs:[]}; } }; return q; } };
   const downloads={ async save({filename,data}){ const blob=data instanceof Blob?data:new Blob([data]); const a=document.createElement('a'); a.href=URL.createObjectURL(blob); a.download=filename; document.body.appendChild(a); a.click(); setTimeout(()=>{ URL.revokeObjectURL(a.href); a.remove(); },3000); return {status:'saved'}; } };
   const user={ id:async()=>dev, canEdit:async()=>false, isOwner:async()=>false, can:async()=>!!URL_ };
@@ -661,6 +663,7 @@ async function submit(){
     $('#overlay').innerHTML=`<div class="scrim"><div class="panel" style="height:auto;margin:auto;max-width:440px;border-radius:8px"><h2>訂單已送出</h2><div class="msg ok">訂單編號 <b class="num">${esc(oid)}</b>：${t.sty} 款色、${fmt(t.qty)} 件，零售金額 ${fmt(t.amt)}。</div><p style="margin:0;color:var(--muted)">在「我的訂單」可以查看或修改這張訂單。</p><div style="display:flex;justify-content:flex-end;gap:8px"><button class="btn" id="b-done-xls">下載 Excel 訂單本</button><button class="btn pri" data-close>好</button></div><div id="done-msg"></div></div></div>`;
     $('#b-done-xls').onclick=async()=>{ try{ await exportBook(doneQty,{...doneDealer,oid,branches:doneBr}); }catch(e){ if(e?.code!=='declined'&&e?.code!=='cancelled') msg('#done-msg','err',e.message||'下載未完成'); } };
   }catch(e){
+    if(e?.code==='order_closed'){ const old=S.editing; S.editing=null; saveDraft(); renderTally(); msg('#sub-msg','err',`這張訂單（${old||''}）已被 SDR 業務刪除或作廢，無法再修改。已改成新訂單，請再按一次送出；如有疑問請聯絡業務。`); const b=$('#b-submit'); if(b){ b.disabled=false; b.textContent='送出訂單'; } return; }
     msg('#sub-msg','err', e?.code==='invalid_argument'?'你的帳號目前沒有下單權限。請聯絡 SDR 業務開啟權限，或先下載 CSV 寄出。':'送出沒有成功（'+(e?.code||e?.message||'未知錯誤')+'）。數量都還在，請稍後再試。');
     btn.disabled=false; btn.textContent=S.editing?'更新並送出':'送出訂單';
   }
