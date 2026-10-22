@@ -16,7 +16,11 @@
  * - 直接刪掉「訂單」分頁裡那一列（明細可一起刪），或把「狀態」改成「作廢」
  * - 之後客人就算從「我的訂單」修改再送出，也不會再寫進來，網頁會請客人重新下新單
  * - 隱藏分頁「_紀錄」記錄收過的訂單編號，請不要刪除
+ *
+ * Email 通知：每張新訂單／修改都會寄信到 NOTIFY_TO（多個收件人用逗號分隔，留空就不寄）
  */
+
+const NOTIFY_TO = 'marc_wang@emers.com';
 
 const ORDER_HEAD = ['送出時間', '訂單編號', '經銷商／店名', '聯絡人', '電話', 'Email', '訂單備註', '款色數', '件數', '零售金額', '分店數', '分店', '狀態'];
 const LINE_HEAD = ['送出時間', '訂單編號', '經銷商／店名', '分店', '分頁', '月份', '款號', '色碼 SKU', '英文品名', '中文品名', '顏色', '尺寸', '數量', '台灣建議售價', '零售金額'];
@@ -62,6 +66,7 @@ function doPost(e) {
       d.lines.forEach(l => push('', l, l.qty));
     }
     if (rows.length) ls.getRange(ls.getLastRow() + 1, 1, rows.length, LINE_HEAD.length).setValues(rows);
+    try { notify_(ss, d, rows, seen); } catch (err) { console.error('notify failed: ' + err); }
     return out_('ok');
   } catch (err) {
     return out_('error: ' + err);
@@ -101,6 +106,36 @@ function removeOid_(sh, oid) {
   for (let i = ids.length - 1; i >= 0; i--) {
     if (String(ids[i][0]) === String(oid)) sh.deleteRow(i + 2);
   }
+}
+
+function notify_(ss, d, rows, isEdit) {
+  if (!NOTIFY_TO) return;
+  const esc = v => String(v == null ? '' : v).replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
+  const fmt = n => Number(n || 0).toLocaleString('en-US');
+  const kind = isEdit ? '訂單修改' : '新訂單';
+  const subject = `【SDR FW27 ${kind}】${d.store || '（未填店名）'}｜${fmt(d.qty)} 件｜NT$${fmt(d.amount)}`;
+  // 依分店、款色彙整成一行一款：M×4 L×2
+  const groups = {};
+  rows.forEach(r => { const key = [r[3], r[6], r[7], r[9], r[10]].join('|'); (groups[key] = groups[key] || { branch: r[3], style: r[6], sku: r[7], zh: r[9], color: r[10], sizes: [], qty: 0, amt: 0 });
+    groups[key].sizes.push(`${r[11]}×${r[12]}`); groups[key].qty += r[12]; groups[key].amt += r[14]; });
+  const list = Object.values(groups);
+  const hasBranch = list.some(g => g.branch);
+  const tr = list.map(g => `<tr>${hasBranch ? `<td>${esc(g.branch)}</td>` : ''}<td>${esc(g.style)}<br><span style="color:#888">${esc(g.sku)}</span></td><td>${esc(g.zh)}</td><td>${esc(g.color)}</td><td>${esc(g.sizes.join('  '))}</td><td style="text-align:right">${g.qty}</td><td style="text-align:right">${fmt(g.amt)}</td></tr>`).join('');
+  const th = s => `<th style="background:#610e0e;color:#fff;padding:6px 8px;text-align:left;font-weight:600">${s}</th>`;
+  const html = `<div style="font-family:Arial,'Microsoft JhengHei',sans-serif;font-size:14px;color:#222">
+  <h2 style="color:#610e0e;margin:0 0 8px">SUN DAY RED FW27 ${kind}</h2>
+  <table style="border-collapse:collapse;margin-bottom:12px">
+  <tr><td style="color:#666;padding:2px 12px 2px 0">訂單編號</td><td><b>${esc(d.oid)}</b></td></tr>
+  <tr><td style="color:#666;padding:2px 12px 2px 0">經銷商／店名</td><td>${esc(d.store)}</td></tr>
+  <tr><td style="color:#666;padding:2px 12px 2px 0">聯絡人</td><td>${esc(d.contact)} ${esc(d.phone)} ${esc(d.email)}</td></tr>
+  ${d.note ? `<tr><td style="color:#666;padding:2px 12px 2px 0">備註</td><td>${esc(d.note)}</td></tr>` : ''}
+  ${(d.branches || []).length ? `<tr><td style="color:#666;padding:2px 12px 2px 0">分店</td><td>${esc(d.branches.map(b => b.name).join('、'))}</td></tr>` : ''}
+  <tr><td style="color:#666;padding:2px 12px 2px 0">合計</td><td><b>${fmt(d.styles)} 款色、${fmt(d.qty)} 件、零售金額 NT$${fmt(d.amount)}</b></td></tr>
+  </table>
+  <table style="border-collapse:collapse;font-size:13px" border="1" bordercolor="#ddd" cellpadding="6">
+  <tr>${hasBranch ? th('分店') : ''}${th('款號')}${th('品名')}${th('顏色')}${th('尺寸×數量')}${th('件數')}${th('零售金額')}</tr>${tr}</table>
+  <p><a href="${ss.getUrl()}" style="color:#610e0e">開啟 Google 試算表看完整訂單</a></p></div>`;
+  MailApp.sendEmail({ to: NOTIFY_TO, subject: subject, htmlBody: html, name: 'SDR FW27 線上訂貨' });
 }
 
 function out_(s) {
