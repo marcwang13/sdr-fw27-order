@@ -64,6 +64,22 @@ button{cursor:pointer}
 .chaintg small{font-weight:400;color:var(--muted)}
 .brbar{display:flex;gap:6px;align-items:center;overflow-x:auto;scrollbar-width:none;padding-bottom:2px}
 .brbar::-webkit-scrollbar{display:none}
+.br.info{border-style:solid;border-color:var(--line);cursor:default}
+.mx-wrap{overflow-x:auto;max-width:100%}
+.mx{border-collapse:collapse;font-size:12px;margin-left:auto}
+.mx th,.mx td{padding:2px 3px;border:0;text-align:center;vertical-align:middle;background:none}
+.mx thead th{font-family:var(--f-disp);font-weight:600;color:var(--muted);letter-spacing:.04em}
+.mx thead th>span:first-child{display:block}
+.mx thead th .pct{margin:2px auto 0;position:relative;display:block;width:46px;height:15px;border-radius:3px;background:var(--sunk);overflow:hidden;font-family:var(--f-mono);font-size:10px;line-height:15px;color:var(--fg);letter-spacing:0}
+.mx .pct i{position:absolute;left:0;top:0;bottom:0;background:color-mix(in srgb,var(--red) 28%,transparent)}
+.mx .pct b{position:relative;font-weight:500}
+.mx .pct.na{color:var(--muted)}
+.mx .bn{text-align:right;font-weight:600;color:var(--fg);max-width:110px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;padding-right:8px;font-family:var(--f-body)}
+.mx td input{width:46px;height:32px;text-align:center;border:1.5px solid color-mix(in srgb,var(--red) 35%,var(--line));border-radius:4px;background:var(--bg);font-family:var(--f-mono);font-size:13px;-moz-appearance:textfield}
+.mx td input::-webkit-outer-spin-button,.mx td input::-webkit-inner-spin-button{-webkit-appearance:none;margin:0}
+.mx td input.on{background:var(--red-soft);border-color:var(--red);color:var(--red);font-weight:600}
+.mx .bt,.mx tfoot td{font-family:var(--f-mono);font-weight:500;min-width:34px}
+.mx tfoot th,.mx tfoot td{border-top:1px solid var(--line);padding-top:4px}
 .brbar .lab{font-size:12px;color:var(--muted);flex:none}
 .br{flex:none;border:1.5px dashed color-mix(in srgb,var(--red) 50%,var(--line));background:var(--surface);border-radius:6px;padding:4px 10px;font-size:13px;display:flex;gap:6px;align-items:center}
 .br small{font-family:var(--f-mono);color:var(--muted);font-size:11px}
@@ -420,12 +436,19 @@ const SHARE={
 };
 const SHARE_CAT={'短袖POLO衫':'POLO','短袖T恤':'T恤','中層／1/4拉鍊衫':'長袖1/4拉鍊','長袖POLO衫':'長袖POLO','長袖T恤':'長袖T恤','連帽衫':'長袖帽T','圓領衫':'長袖無領','針織衫':'長袖無領','外套':'上衣合計','背心':'上衣合計','長褲':'長褲（腰圍）','短褲':'長褲（腰圍）'};
 function shareFor(it){ if(it.sheet!=='服裝-男') return null; const k=SHARE_CAT[it.cat]; return k?{k,m:SHARE[k]}:null; }
-function subHTML(it){ const tq=itemQty(it.id); if(!tq) return '&nbsp;'; let s=`${S.chain?'全部分店 ':'小計 '}<b>${tq}</b> 件 · <b>${fmt(tq*(it.price||0))}</b>`; if(S.chain){ const m=curQ()[it.id]||{}; let c=0; for(const z in m) c+=m[z]; s=`本店 <b>${c}</b> ・ `+s; } return s; }
+function matrixHTML(it,sh){
+  const head=it.sizes.map(z=>{ const p=sh?sh.m[z]:null; return `<th><span>${esc(z)}</span>${sh?(p!=null?`<span class="pct" title="FW26 ${esc(sh.k)} 尺寸銷售佔比"><i style="width:${Math.round(p*100)}%"></i><b>${Math.round(p*100)}%</b></span>`:'<span class="pct na">–</span>'):''}</th>`; }).join('');
+  const rows=S.br.map(b=>{ const m=(S.bq[b.id]||{})[it.id]||{}; let t=0; const cells=it.sizes.map(z=>{ const v=m[z]||''; t+=m[z]||0; return `<td><input class="${v?'on':''}" type="number" min="0" step="1" inputmode="numeric" id="q-${esc(it.id)}-${esc(z)}-${b.id}" data-sz="${esc(z)}" data-brq="${b.id}" value="${v}" aria-label="${esc(b.name+' '+it.en+' '+it.color+' '+z)} 數量"></td>`; }).join(''); return `<tr><th class="bn" title="${esc(b.name)}">${esc(b.name)}</th>${cells}<td class="bt" data-bt="${b.id}">${t||''}</td></tr>`; }).join('');
+  const colT=it.sizes.map(z=>{ let t=0; S.br.forEach(b=>{ t+=(((S.bq[b.id]||{})[it.id]||{})[z])||0; }); return `<td data-ct="${esc(z)}">${t||''}</td>`; }).join('');
+  return `<div class="mx-wrap"><table class="mx"><thead><tr><th class="bn">分店</th>${head}<th>合計</th></tr></thead><tbody>${rows}</tbody><tfoot><tr><th class="bn">合計</th>${colT}<td data-ctt>${itemQty(it.id)||''}</td></tr></tfoot></table></div>`;
+}
+function subHTML(it){ const tq=itemQty(it.id); if(!tq) return '&nbsp;'; let s=`${S.chain?'全部分店 ':'小計 '}<b>${tq}</b> 件 · <b>${fmt(tq*(it.price||0))}</b>`; return s; }
 function itemHTML(it){
   const q=curQ()[it.id]||{}; const tq=itemQty(it.id);
   const open=S.open.has(it.id);
   const sh=shareFor(it);
   const sizes = it.sizes.map(sz=>{ const v=q[sz]||''; const p=sh?sh.m[sz]:null; const pct=sh?(p!=null?`<span class="pct" title="FW26 ${esc(sh.k)} 尺寸銷售佔比"><i style="width:${Math.round(p*100)}%"></i><b>${Math.round(p*100)}%</b></span>`:'<span class="pct na">–</span>'):''; return `<label class="sz"><span>${esc(sz)}</span><input class="${v?'on':''}" type="number" min="0" step="1" inputmode="numeric" id="q-${esc(it.id)}-${esc(sz)}" data-sz="${esc(sz)}" value="${v}" aria-label="${esc(it.en+' '+it.color+' '+sz)} 數量">${pct}</label>`; }).join('');
+  const sizesBlock = S.chain ? matrixHTML(it,sh) : `<div class="sizes">${sizes}</div>`;
   return `<article class="item ${tq?'has':''}" data-id="${esc(it.id)}">
     <div class="pic">${picHTML(it)}</div>
     <div class="info">
@@ -439,7 +462,7 @@ function itemHTML(it){
     </div>
     <div class="order">
       <div class="ordtop"><div class="price">${it.price?`<small>建議售價</small>${fmt(it.price)}`:'<small>售價待確認</small>'}</div><div class="sub" data-sub>${subHTML(it)}</div></div>
-      <div class="sizes">${sizes}</div>
+      ${sizesBlock}
       ${sh?`<div class="share">FW26 尺寸銷售佔比參考・<b>${esc(sh.k)}</b>${it.cat==="短褲"?"（依長褲腰圍）":""}</div>`:""}
     </div>
   </article>`;
@@ -464,20 +487,21 @@ function renderTally(){
   const t=totals();
   $('#t-qtyl').textContent=S.chain?'全部分店件數':'件數'; $('#t-sty').textContent=t.sty; $('#t-qty').textContent=fmt(t.qty); $('#t-amt').textContent=fmt(t.amt);
   $('#t-edit').hidden=!S.editing; $('#t-eid').textContent=S.editing||'';
-  $('#t-br').hidden=!S.chain; if(S.chain){ const b=S.br.find(x=>x.id===S.cur); const st=b?brStats(b):{qty:0}; $('#t-brn').textContent=(b?b.name:'本店')+' 件數'; $('#t-brq').textContent=fmt(st.qty); }
+  $('#t-br').hidden=!S.chain; if(S.chain){ $('#t-brn').textContent='分店數'; $('#t-brq').textContent=S.br.length; }
   $('#b-review').disabled=!t.qty;
 }
 $('#list').addEventListener('input',e=>{
   const inp=e.target.closest('input[data-sz]'); if(!inp) return;
   const card=inp.closest('.item'); const id=card.dataset.id; const sz=inp.dataset.sz;
   let v=parseInt(inp.value,10); if(!(v>0)) v=0; if(v>9999) v=9999;
-  const Q=curQ(); Q[id]=Q[id]||{}; if(v) Q[id][sz]=v; else delete Q[id][sz];
+  const Q=inp.dataset.brq?(S.bq[inp.dataset.brq]=S.bq[inp.dataset.brq]||{}):curQ(); Q[id]=Q[id]||{}; if(v) Q[id][sz]=v; else delete Q[id][sz];
   if(!Object.keys(Q[id]).length) delete Q[id];
   recalcAgg();
   inp.classList.toggle('on',!!v);
   const tq=itemQty(id), it=BY[id];
   card.classList.toggle('has',!!tq);
   card.querySelector('[data-sub]').innerHTML = subHTML(it);
+  if(inp.dataset.brq){ const b=inp.dataset.brq; const m=(S.bq[b]||{})[id]||{}; let t=0; for(const z in m) t+=m[z]; const bt=card.querySelector(`[data-bt="${b}"]`); if(bt) bt.textContent=t||''; let ct=0; S.br.forEach(x=>{ ct+=(((S.bq[x.id]||{})[id]||{})[sz])||0; }); const c=card.querySelector(`[data-ct="${CSS.escape(sz)}"]`); if(c) c.textContent=ct||''; const ctt=card.querySelector('[data-ctt]'); if(ctt) ctt.textContent=tq||''; }
   saveDraft(); renderTally(); renderTabsDots(); renderBranchBar();
 });
 function renderTabsDots(){ const t=totals(); document.querySelectorAll('#tabs .tab').forEach(b=>{ const d=t.bySheet[b.dataset.s]; let dot=b.querySelector('.dot'); if(d){ if(!dot){ dot=document.createElement('span'); dot.className='dot'; b.appendChild(dot);} dot.textContent=d; } else if(dot) dot.remove(); }); }
@@ -895,7 +919,7 @@ $('#x-file').addEventListener('change',async e=>{ const f=e.target.files[0]; e.t
   }catch(err){ $('#x-msg').textContent=err.message||'讀不到這個檔案，請確認是 .xlsx。'; }
 });
 function renderBranchBar(){ const bar=$('#brbar'); bar.hidden=!S.chain; $('#chain').checked=S.chain; if(!S.chain){ bar.innerHTML=''; return; }
-  bar.innerHTML='<span class="lab">分店</span>'+S.br.map(b=>{ const t=brStats(b); return `<button class="br" data-br="${b.id}" aria-pressed="${b.id===S.cur}">${esc(b.name)}<small>${t.qty}</small></button>`; }).join('')+'<button class="br add" data-bradd>＋新增店點</button><button class="br mng" data-brmng>管理</button>'; }
+  bar.innerHTML='<span class="lab">分店</span>'+S.br.map(b=>{ const t=brStats(b); return `<span class="br info">${esc(b.name)}<small>${t.qty} 件</small></span>`; }).join('')+'<button class="br add" data-bradd>＋新增店點</button><button class="br mng" data-brmng>管理</button>'; }
 function brDialog(title,val,onOk){ $('#overlay').innerHTML=`<div class="scrim"><div class="panel" style="height:auto;margin:auto;max-width:400px;border-radius:8px"><h2>${title}</h2><div class="fld"><label for="br-name">店點名稱</label><input id="br-name" value="${esc(val||'')}" placeholder="例如：台北信義店"></div><div id="br-msg"></div><div style="display:flex;gap:8px;justify-content:flex-end"><button class="btn" data-close>取消</button><button class="btn pri" id="br-ok">確定</button></div></div></div>`; const inp=$('#br-name'); inp.focus(); inp.select();
   const go=()=>{ const v=inp.value.trim(); if(!v){ msg('#br-msg','err','請輸入店點名稱。'); return; } if(S.br.some(b=>b.name===v&&b.name!==val)){ msg('#br-msg','err','已經有同名的店點。'); return; } onOk(v); closeOverlay(); saveDraft(); renderAll(); };
   $('#br-ok').onclick=go; inp.addEventListener('keydown',e=>{ if(e.key==='Enter') go(); }); }
