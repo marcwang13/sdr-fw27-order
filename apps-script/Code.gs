@@ -11,6 +11,8 @@
  * 每張訂單會寫入兩個分頁：
  * - 訂單：一張單一列（同一個訂單編號再次送出會覆蓋舊資料）
  * - 明細：每個款色尺寸一列（連鎖分店會分店分開列）
+ * - 另外每張訂單自動開一個分頁，分頁名＝經銷商／店名，款色一列、尺寸橫排
+ *   （舊訂單要補分頁：編輯器選 rebuildOrderTabs 執行一次）
  *
  * 刪除／作廢訂單：
  * - 直接刪掉「訂單」分頁裡那一列（明細可一起刪），或把「狀態」改成「作廢」
@@ -66,6 +68,10 @@ function doPost(e) {
       d.lines.forEach(l => push('', l, l.qty));
     }
     if (rows.length) ls.getRange(ls.getLastRow() + 1, 1, rows.length, LINE_HEAD.length).setValues(rows);
+    try {
+      writeOrderTab_(ss, log, d.oid, { t: t, store: d.store, contact: d.contact, phone: d.phone, email: d.email, note: d.note,
+        branches: branches.map(b => b.name).join('、'), styles: d.styles, qty: d.qty, amount: d.amount, status: d.status || '已送出' }, rows);
+    } catch (err) { console.error('order tab failed: ' + err); }
     try { notify_(ss, d, rows, seen); } catch (err) { console.error('notify failed: ' + err); }
     return out_('ok');
   } catch (err) {
@@ -106,6 +112,116 @@ function removeOid_(sh, oid) {
   for (let i = ids.length - 1; i >= 0; i--) {
     if (String(ids[i][0]) === String(oid)) sh.deleteRow(i + 2);
   }
+}
+
+// ── 每張訂單一個分頁（分頁名＝經銷商／店名）──────────────────────────
+const SIZE_ORDER = ['XXS', 'XS', 'S', 'M', 'L', 'XL', '2XL', 'XXL', '3XL', '4XL', 'FREE', 'FREE SIZE', 'F'];
+const RESERVED_TABS = ['訂單', '明細', '_紀錄'];
+
+function sizeCmp_(a, b) {
+  const k = s => {
+    s = String(s).toUpperCase().trim();
+    const i = SIZE_ORDER.indexOf(s);
+    if (i >= 0) return [0, i, ''];
+    const n = parseFloat(s);
+    if (!isNaN(n)) return [1, n, s];
+    return [2, 0, s];
+  };
+  const x = k(a), y = k(b);
+  for (let i = 0; i < 3; i++) { if (x[i] < y[i]) return -1; if (x[i] > y[i]) return 1; }
+  return 0;
+}
+
+// 找這張訂單已經用的分頁名；沒有就用店名開一個（同名就加 (2)、(3)）
+function tabName_(ss, log, oid, store) {
+  const n = log.getLastRow();
+  const vals = n ? log.getRange(1, 1, n, 3).getValues() : [];
+  let at = -1;
+  for (let i = 0; i < vals.length; i++) if (String(vals[i][0]) === String(oid)) { at = i; break; }
+  if (at >= 0 && vals[at][2] && ss.getSheetByName(vals[at][2])) return String(vals[at][2]);
+  const used = vals.filter((v, i) => i !== at && v[2]).map(v => String(v[2]));
+  const base = (String(store || '').replace(/[\[\]\*\?:\\\/]/g, '-').trim() || String(oid)).slice(0, 90);
+  let name = base, k = 2;
+  while (RESERVED_TABS.indexOf(name) >= 0 || used.indexOf(name) >= 0 || ss.getSheetByName(name)) name = `${base} (${k++})`;
+  if (at >= 0) log.getRange(at + 1, 3).setValue(name);
+  else log.appendRow([oid, new Date(), name]);
+  return name;
+}
+
+// rows 欄位同 LINE_HEAD：0時間 1編號 2店名 3分店 4分頁 5月份 6款號 7SKU 8英文 9中文 10顏色 11尺寸 12數量 13售價 14金額
+function writeOrderTab_(ss, log, oid, m, rows) {
+  const name = tabName_(ss, log, oid, m.store);
+  const sh = ss.getSheetByName(name) || ss.insertSheet(name, ss.getNumSheets());
+  sh.clear();
+  sh.setFrozenRows(0);
+
+  const groups = {}, order = [], sizes = [];
+  rows.forEach(r => {
+    const key = [r[3], r[7], r[6], r[10]].join('|');
+    if (!groups[key]) { groups[key] = { r: r, q: {}, qty: 0, amt: 0 }; order.push(key); }
+    const g = groups[key], sz = String(r[11]);
+    g.q[sz] = (g.q[sz] || 0) + Number(r[12] || 0);
+    g.qty += Number(r[12] || 0); g.amt += Number(r[14] || 0);
+    if (sizes.indexOf(sz) < 0) sizes.push(sz);
+  });
+  sizes.sort(sizeCmp_);
+  const hasBranch = rows.some(r => r[3]);
+
+  const info = [
+    ['SUN DAY RED FW27 訂單', ''],
+    ['訂單編號', oid],
+    ['送出時間', m.t || ''],
+    ['經銷商／店名', m.store || ''],
+    ['聯絡人', [m.contact, m.phone, m.email].filter(Boolean).join('  ')],
+    ['分店', m.branches || ''],
+    ['備註', m.note || ''],
+    ['合計', `${m.styles || order.length} 款色、${m.qty || 0} 件、零售金額 NT$${Number(m.amount || 0).toLocaleString('en-US')}`],
+    ['狀態', m.status || ''],
+  ];
+  sh.getRange(1, 1, info.length, 2).setValues(info);
+  sh.getRange(1, 1).setFontSize(14).setFontWeight('bold').setFontColor('#610e0e');
+  sh.getRange(2, 1, info.length - 1, 1).setFontColor('#666666');
+  sh.getRange(8, 2).setFontWeight('bold');
+
+  const top = info.length + 2;
+  const head = (hasBranch ? ['分店'] : []).concat(['分頁', '月份', '款號', '色碼 SKU', '中文品名', '英文品名', '顏色'], sizes, ['件數', '台灣建議售價', '零售金額']);
+  const body = order.map(k => {
+    const g = groups[k], r = g.r;
+    return (hasBranch ? [r[3]] : []).concat([r[4], r[5], r[6], r[7], r[9], r[8], r[10]], sizes.map(s => g.q[s] || ''), [g.qty, r[13], g.amt]);
+  });
+  const tq = order.reduce((s, k) => s + groups[k].qty, 0), ta = order.reduce((s, k) => s + groups[k].amt, 0);
+  const foot = head.map((_, i) => '');
+  foot[0] = '合計';
+  sizes.forEach((s, i) => { foot[head.length - 3 - sizes.length + i] = order.reduce((t, k) => t + (groups[k].q[s] || 0), 0); });
+  foot[head.length - 3] = tq; foot[head.length - 1] = ta;
+
+  const all = [head].concat(body, [foot]);
+  sh.getRange(top, 1, all.length, head.length).setValues(all);
+  sh.getRange(top, 1, 1, head.length).setFontWeight('bold').setBackground('#610e0e').setFontColor('#ffffff');
+  sh.getRange(top + all.length - 1, 1, 1, head.length).setFontWeight('bold').setBackground('#f3e6e6');
+  sh.getRange(top, 1, all.length, head.length).setBorder(true, true, true, true, true, true, '#dddddd', SpreadsheetApp.BorderStyle.SOLID);
+  const firstSize = head.length - 3 - sizes.length + 1;
+  sh.getRange(top, firstSize, all.length, sizes.length + 1).setHorizontalAlignment('center');
+  sh.getRange(top + 1, head.length - 1, all.length - 1, 2).setNumberFormat('#,##0');
+  sh.setFrozenRows(top);
+  sh.autoResizeColumns(1, head.length);
+}
+
+// 用「訂單」＋「明細」把每張訂單的分頁重建一次（第一次安裝或手動整理時在編輯器執行）
+function rebuildOrderTabs() {
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  const os = sheet_(ss, '訂單', ORDER_HEAD), ls = sheet_(ss, '明細', LINE_HEAD), log = logSheet_(ss);
+  const on = os.getLastRow(), ln = ls.getLastRow();
+  if (on < 2) return;
+  const lines = ln < 2 ? [] : ls.getRange(2, 1, ln - 1, LINE_HEAD.length).getValues();
+  const H = h => ORDER_HEAD.indexOf(h);
+  os.getRange(2, 1, on - 1, ORDER_HEAD.length).getValues().forEach(o => {
+    const oid = String(o[1]);
+    if (!oid) return;
+    const rows = lines.filter(l => String(l[1]) === oid);
+    writeOrderTab_(ss, log, oid, { t: o[0], store: o[2], contact: o[3], phone: o[4], email: o[5], note: o[6],
+      branches: o[H('分店')], styles: o[H('款色數')], qty: o[H('件數')], amount: o[H('零售金額')], status: o[H('狀態')] }, rows);
+  });
 }
 
 function notify_(ss, d, rows, isEdit) {
