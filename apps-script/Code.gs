@@ -22,12 +22,15 @@
  * 管理者檢視：網站網址加 ?admin=金鑰 就會出現「訂單彙整」（金鑰在 專案設定 → 指令碼屬性 ADMIN_KEY）
  * 客人刪除：「我的訂單」按刪除 → 從 訂單／明細 移除、刪掉該訂單分頁、寄「訂單取消」信
  *
+ * 登入：客人用 Email 收驗證碼登入後才能送單；每張單記錄「帳號 Email」，只有同一個帳號能修改／刪除
+ * 客人通知：送出／修改會寄確認信＋Excel 訂單本到客人的帳號 Email；刪除會寄取消通知
+ *
  * Email 通知：每張新訂單／修改都會寄信到 NOTIFY_TO（多個收件人用逗號分隔，留空就不寄）
  */
 
 const NOTIFY_TO = 'marc_wang@emers.com';
 
-const ORDER_HEAD = ['送出時間', '訂單編號', '經銷商／店名', '聯絡人', '電話', 'Email', '訂單備註', '款色數', '件數', '零售金額', '分店數', '分店', '狀態'];
+const ORDER_HEAD = ['送出時間', '訂單編號', '經銷商／店名', '聯絡人', '電話', 'Email', '訂單備註', '款色數', '件數', '零售金額', '分店數', '分店', '狀態', '帳號 Email'];
 const LINE_HEAD = ['送出時間', '訂單編號', '經銷商／店名', '分店', '分頁', '月份', '款號', '色碼 SKU', '英文品名', '中文品名', '顏色', '尺寸', '數量', '台灣建議售價', '零售金額'];
 
 // 管理者金鑰存在「專案設定 → 指令碼屬性」的 ADMIN_KEY（不寫在程式裡）
@@ -64,7 +67,7 @@ function listOrders_(ss) {
   return os.getRange(2, 1, on - 1, ORDER_HEAD.length).getValues().filter(o => o[1]).map(o => ({
     oid: String(o[1]), submittedAt: iso(o[0]), store: String(o[2] || ''), contact: String(o[3] || ''), phone: String(o[4] || ''),
     email: String(o[5] || ''), note: String(o[6] || ''), styles: Number(o[H('款色數')] || 0), qty: Number(o[H('件數')] || 0),
-    amount: Number(o[H('零售金額')] || 0), status: String(o[H('狀態')] || '已送出'), lines: byOid[String(o[1])] || []
+    amount: Number(o[H('零售金額')] || 0), status: String(o[H('狀態')] || '已送出'), account: String(o[H('帳號 Email')] || '').toLowerCase(), lines: byOid[String(o[1])] || []
   }));
 }
 
@@ -86,9 +89,20 @@ function doPost(e) {
   lock.waitLock(30000);
   try {
     const d = JSON.parse(e.postData.contents);
-    if (d && d.action === 'cancel' && d.oid) return out_(cancel_(SpreadsheetApp.getActiveSpreadsheet(), String(d.oid)));
+    if (d && d.action === 'otp_send') return out_(otpSend_(d.email));
+    if (d && d.action === 'otp_verify') return out_(JSON.stringify(otpVerify_(d.email, d.code)));
+    const acct = authEmail_(d && d.auth);
+    if (d && d.action === 'mine') {
+      if (!acct) return out_(JSON.stringify({ error: 'login_required' }));
+      return out_(JSON.stringify({ orders: listOrders_(SpreadsheetApp.getActiveSpreadsheet()).filter(o => o.account === acct) }));
+    }
+    if (d && d.action === 'cancel' && d.oid) {
+      if (!acct) return out_('login_required');
+      return out_(cancel_(SpreadsheetApp.getActiveSpreadsheet(), String(d.oid), acct));
+    }
     if (d && d.action === 'status' && d.oid) return out_(adminOk_(d.key) ? setStatus_(SpreadsheetApp.getActiveSpreadsheet(), String(d.oid), String(d.status || '已確認')) : 'forbidden');
     if (!d || !d.oid || !Array.isArray(d.lines)) return out_('invalid');
+    if (!acct) return out_('login_required');
     const ss = SpreadsheetApp.getActiveSpreadsheet();
     const os = sheet_(ss, '訂單', ORDER_HEAD);
     const ls = sheet_(ss, '明細', LINE_HEAD);
@@ -96,6 +110,7 @@ function doPost(e) {
     const seen = log.getLastRow() > 0 && log.getRange(1, 1, log.getLastRow(), 1).getValues().some(r => String(r[0]) === String(d.oid));
     const row = findOid_(os, d.oid);
     if (row && String(os.getRange(row, ORDER_HEAD.indexOf('狀態') + 1).getValue()).trim() === '作廢') return out_('void');
+    if (row) { const owner = String(os.getRange(row, ORDER_HEAD.indexOf('帳號 Email') + 1).getValue() || '').toLowerCase(); if (owner && owner !== acct) return out_('forbidden'); }
     if (seen && !row) return out_('deleted');
     if (!seen) log.appendRow([d.oid, new Date()]);
     removeOid_(os, d.oid);
@@ -104,7 +119,7 @@ function doPost(e) {
     const t = d.submittedAt ? new Date(d.submittedAt) : new Date();
     const branches = Array.isArray(d.branches) ? d.branches : [];
     os.appendRow([t, d.oid, d.store || '', d.contact || '', d.phone || '', d.email || '', d.note || '',
-      d.styles || 0, d.qty || 0, d.amount || 0, branches.length || '', branches.map(b => b.name).join('、'), d.status || '已送出']);
+      d.styles || 0, d.qty || 0, d.amount || 0, branches.length || '', branches.map(b => b.name).join('、'), d.status || '已送出', acct]);
 
     const info = {};
     d.lines.forEach(l => { info[l.k] = l; });
@@ -124,7 +139,11 @@ function doPost(e) {
       writeOrderTab_(ss, log, d.oid, { t: t, store: d.store, contact: d.contact, phone: d.phone, email: d.email, note: d.note,
         branches: branches.map(b => b.name).join('、'), styles: d.styles, qty: d.qty, amount: d.amount, status: d.status || '已送出' }, rows);
     } catch (err) { console.error('order tab failed: ' + err); }
-    try { notify_(ss, d, rows, seen); } catch (err) { console.error('notify failed: ' + err); }
+    d.account = acct;
+    let att = null;
+    try { if (d._xlsx) att = Utilities.newBlob(Utilities.base64Decode(d._xlsx), 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet', String(d._xlsxName || ('SDR_FW27_訂單本_' + d.oid + '.xlsx'))); } catch (err) { console.error('xlsx decode failed: ' + err); }
+    try { notify_(ss, d, rows, seen, null, att); } catch (err) { console.error('notify failed: ' + err); }
+    try { customerMail_(d, rows, seen ? '訂單已更新' : '訂單確認', acct, att); } catch (err) { console.error('customer mail failed: ' + err); }
     return out_('ok');
   } catch (err) {
     return out_('error: ' + err);
@@ -139,6 +158,9 @@ function sheet_(ss, name, head) {
     sh = ss.insertSheet(name);
     sh.getRange(1, 1, 1, head.length).setValues([head]).setFontWeight('bold').setBackground('#610e0e').setFontColor('#ffffff');
     sh.setFrozenRows(1);
+  } else if (sh.getLastColumn() < head.length) {
+    const from = sh.getLastColumn() + 1;
+    sh.getRange(1, from, 1, head.length - from + 1).setValues([head.slice(from - 1)]).setFontWeight('bold').setBackground('#610e0e').setFontColor('#ffffff');
   }
   return sh;
 }
@@ -277,13 +299,15 @@ function rebuildOrderTabs() {
 }
 
 // 客人在「我的訂單」按刪除：從 訂單／明細 移除、刪掉該訂單分頁、寄取消通知（信裡保留原本明細）
-function cancel_(ss, oid) {
+function cancel_(ss, oid, acct) {
   const os = sheet_(ss, '訂單', ORDER_HEAD), ls = sheet_(ss, '明細', LINE_HEAD), log = logSheet_(ss);
   const row = findOid_(os, oid);
   if (!row) return 'deleted';
   const o = os.getRange(row, 1, 1, ORDER_HEAD.length).getValues()[0];
   const H = h => ORDER_HEAD.indexOf(h);
   if (String(o[H('狀態')]).trim() === '作廢') return 'void';
+  const owner = String(o[H('帳號 Email')] || '').toLowerCase();
+  if (owner && owner !== acct) return 'forbidden';
   const ln = ls.getLastRow();
   const rows = ln < 2 ? [] : ls.getRange(2, 1, ln - 1, LINE_HEAD.length).getValues().filter(r => String(r[1]) === oid);
   removeOid_(os, oid);
@@ -303,37 +327,109 @@ function cancel_(ss, oid) {
       branches: String(o[H('分店')] || '').split('、').filter(Boolean).map(x => ({ name: x })),
       styles: o[H('款色數')], qty: o[H('件數')], amount: o[H('零售金額')] }, rows, false, '訂單取消');
   } catch (err) { console.error('notify failed: ' + err); }
+  try {
+    customerMail_({ oid: oid, store: o[2], contact: o[3], phone: o[4], email: o[5], note: o[6],
+      branches: String(o[H('分店')] || '').split('、').filter(Boolean).map(x => ({ name: x })),
+      styles: o[H('款色數')], qty: o[H('件數')], amount: o[H('零售金額')] }, rows, '訂單已取消', owner || acct, null);
+  } catch (err) { console.error('customer mail failed: ' + err); }
   return 'ok';
 }
 
-function notify_(ss, d, rows, isEdit, kindOverride) {
-  if (!NOTIFY_TO) return;
+function orderHtml_(d, rows, title, intro, footer) {
   const esc = v => String(v == null ? '' : v).replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
   const fmt = n => Number(n || 0).toLocaleString('en-US');
-  const kind = kindOverride || (isEdit ? '訂單修改' : '新訂單');
-  const subject = `【SDR FW27 ${kind}】${d.store || '（未填店名）'}｜${fmt(d.qty)} 件｜NT$${fmt(d.amount)}`;
   // 依分店、款色彙整成一行一款：M×4 L×2
   const groups = {};
   rows.forEach(r => { const key = [r[3], r[6], r[7], r[9], r[10]].join('|'); (groups[key] = groups[key] || { branch: r[3], style: r[6], sku: r[7], zh: r[9], color: r[10], sizes: [], qty: 0, amt: 0 });
-    groups[key].sizes.push(`${r[11]}×${r[12]}`); groups[key].qty += r[12]; groups[key].amt += r[14]; });
+    groups[key].sizes.push(`${r[11]}×${r[12]}`); groups[key].qty += Number(r[12]); groups[key].amt += Number(r[14]); });
   const list = Object.values(groups);
   const hasBranch = list.some(g => g.branch);
   const tr = list.map(g => `<tr>${hasBranch ? `<td>${esc(g.branch)}</td>` : ''}<td>${esc(g.style)}<br><span style="color:#888">${esc(g.sku)}</span></td><td>${esc(g.zh)}</td><td>${esc(g.color)}</td><td>${esc(g.sizes.join('  '))}</td><td style="text-align:right">${g.qty}</td><td style="text-align:right">${fmt(g.amt)}</td></tr>`).join('');
   const th = s => `<th style="background:#610e0e;color:#fff;padding:6px 8px;text-align:left;font-weight:600">${s}</th>`;
-  const html = `<div style="font-family:Arial,'Microsoft JhengHei',sans-serif;font-size:14px;color:#222">
-  <h2 style="color:#610e0e;margin:0 0 8px">SUN DAY RED FW27 ${kind}</h2>
+  return `<div style="font-family:Arial,'Microsoft JhengHei',sans-serif;font-size:14px;color:#222">
+  <h2 style="color:#610e0e;margin:0 0 8px">SUN DAY RED FW27 ${esc(title)}</h2>
+  ${intro ? `<p style="margin:0 0 12px">${intro}</p>` : ''}
   <table style="border-collapse:collapse;margin-bottom:12px">
   <tr><td style="color:#666;padding:2px 12px 2px 0">訂單編號</td><td><b>${esc(d.oid)}</b></td></tr>
   <tr><td style="color:#666;padding:2px 12px 2px 0">經銷商／店名</td><td>${esc(d.store)}</td></tr>
   <tr><td style="color:#666;padding:2px 12px 2px 0">聯絡人</td><td>${esc(d.contact)} ${esc(d.phone)} ${esc(d.email)}</td></tr>
+  ${d.account ? `<tr><td style="color:#666;padding:2px 12px 2px 0">下單帳號</td><td>${esc(d.account)}</td></tr>` : ''}
   ${d.note ? `<tr><td style="color:#666;padding:2px 12px 2px 0">備註</td><td>${esc(d.note)}</td></tr>` : ''}
   ${(d.branches || []).length ? `<tr><td style="color:#666;padding:2px 12px 2px 0">分店</td><td>${esc(d.branches.map(b => b.name).join('、'))}</td></tr>` : ''}
   <tr><td style="color:#666;padding:2px 12px 2px 0">合計</td><td><b>${fmt(d.styles)} 款色、${fmt(d.qty)} 件、零售金額 NT$${fmt(d.amount)}</b></td></tr>
   </table>
-  <table style="border-collapse:collapse;font-size:13px" border="1" bordercolor="#ddd" cellpadding="6">
-  <tr>${hasBranch ? th('分店') : ''}${th('款號')}${th('品名')}${th('顏色')}${th('尺寸×數量')}${th('件數')}${th('零售金額')}</tr>${tr}</table>
-  <p><a href="${ss.getUrl()}" style="color:#610e0e">開啟 Google 試算表看完整訂單</a></p></div>`;
-  MailApp.sendEmail({ to: NOTIFY_TO, subject: subject, htmlBody: html, name: 'SDR FW27 線上訂貨' });
+  ${list.length ? `<table style="border-collapse:collapse;font-size:13px" border="1" bordercolor="#ddd" cellpadding="6">
+  <tr>${hasBranch ? th('分店') : ''}${th('款號')}${th('品名')}${th('顏色')}${th('尺寸×數量')}${th('件數')}${th('零售金額')}</tr>${tr}</table>` : ''}
+  ${footer || ''}</div>`;
+}
+
+function notify_(ss, d, rows, isEdit, kindOverride, att) {
+  if (!NOTIFY_TO) return;
+  const fmt = n => Number(n || 0).toLocaleString('en-US');
+  const kind = kindOverride || (isEdit ? '訂單修改' : '新訂單');
+  const subject = `【SDR FW27 ${kind}】${d.store || '（未填店名）'}｜${fmt(d.qty)} 件｜NT$${fmt(d.amount)}`;
+  const html = orderHtml_(d, rows, kind, '', `<p><a href="${ss.getUrl()}" style="color:#610e0e">開啟 Google 試算表看完整訂單</a></p>`);
+  const msg = { to: NOTIFY_TO, subject: subject, htmlBody: html, name: 'SDR FW27 線上訂貨' };
+  if (att) msg.attachments = [att];
+  MailApp.sendEmail(msg);
+}
+
+// 寄給客人（帳號 Email）：訂單確認／已更新附 Excel 訂單本；取消只寄通知
+function customerMail_(d, rows, kind, to, att) {
+  if (!to) return;
+  const intro = kind === '訂單已取消'
+    ? '您的這張訂單已經取消，以下是原本的內容供您留存。如非本人操作，請盡快聯絡 SUN DAY RED 業務。'
+    : `感謝您的訂購，${kind === '訂單已更新' ? '訂單已更新為以下內容' : '我們已收到您的訂單'}。${att ? '完整的 Excel 訂單本在附件。' : ''}如需修改或刪除，請到下單網站的「我的訂單」操作。`;
+  const html = orderHtml_(d, rows, kind, intro, '<p style="color:#888;font-size:12px">此信由系統自動寄出，有任何問題請直接回覆此信或聯絡 SUN DAY RED 業務。</p>');
+  const msg = { to: to, subject: `【SUN DAY RED FW27】${kind}｜${d.oid}`, htmlBody: html, name: 'SUN DAY RED 台灣', replyTo: NOTIFY_TO.split(',')[0].trim() };
+  if (att) msg.attachments = [att];
+  MailApp.sendEmail(msg);
+}
+
+// ── Email 驗證碼登入 ─────────────────────────────────────────
+function authSecret_() {
+  const pr = PropertiesService.getScriptProperties();
+  let k = pr.getProperty('AUTH_SECRET');
+  if (!k) { k = Utilities.getUuid() + Utilities.getUuid(); pr.setProperty('AUTH_SECRET', k); }
+  return k;
+}
+function normEmail_(e) {
+  const s = String(e || '').trim().toLowerCase();
+  return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(s) ? s : '';
+}
+function tokenFor_(email) {
+  return Utilities.base64EncodeWebSafe(Utilities.computeHmacSha256Signature(email, authSecret_()));
+}
+function authEmail_(a) {
+  if (!a) return '';
+  const em = normEmail_(a.email);
+  return em && a.token && String(a.token) === tokenFor_(em) ? em : '';
+}
+function otpSend_(email) {
+  const em = normEmail_(email);
+  if (!em) return 'invalid_email';
+  const c = CacheService.getScriptCache();
+  if (c.get('otpwait:' + em)) return 'wait';
+  const code = String(Math.floor(100000 + Math.random() * 900000));
+  c.put('otp:' + em, code, 600);
+  c.put('otptry:' + em, '0', 600);
+  c.put('otpwait:' + em, '1', 60);
+  MailApp.sendEmail({ to: em, subject: `SUN DAY RED FW27 線上訂貨 登入驗證碼：${code}`, name: 'SUN DAY RED 台灣',
+    htmlBody: `<div style="font-family:Arial,'Microsoft JhengHei',sans-serif;font-size:14px;color:#222"><h2 style="color:#610e0e;margin:0 0 8px">SUN DAY RED FW27 線上訂貨</h2><p>您的登入驗證碼是：</p><p style="font-size:28px;font-weight:bold;letter-spacing:6px;margin:8px 0">${code}</p><p style="color:#666">10 分鐘內有效。如果不是您本人要登入，請忽略這封信。</p></div>` });
+  return 'ok';
+}
+function otpVerify_(email, code) {
+  const em = normEmail_(email);
+  if (!em) return { error: 'invalid_email' };
+  const c = CacheService.getScriptCache();
+  const want = c.get('otp:' + em);
+  if (!want) return { error: 'expired' };
+  const tries = Number(c.get('otptry:' + em) || 0) + 1;
+  c.put('otptry:' + em, String(tries), 600);
+  if (tries > 5) { c.remove('otp:' + em); return { error: 'too_many' }; }
+  if (String(code || '').trim() !== want) return { error: 'bad_code' };
+  c.remove('otp:' + em);
+  return { email: em, token: tokenFor_(em) };
 }
 
 function out_(s) {
