@@ -19,6 +19,9 @@
  * - 之後客人就算從「我的訂單」修改再送出，也不會再寫進來，網頁會請客人重新下新單
  * - 隱藏分頁「_紀錄」記錄收過的訂單編號，請不要刪除
  *
+ * 管理者檢視：網站網址加 ?admin=金鑰 就會出現「訂單彙整」（金鑰在 專案設定 → 指令碼屬性 ADMIN_KEY）
+ * 客人刪除：「我的訂單」按刪除 → 從 訂單／明細 移除、刪掉該訂單分頁、寄「訂單取消」信
+ *
  * Email 通知：每張新訂單／修改都會寄信到 NOTIFY_TO（多個收件人用逗號分隔，留空就不寄）
  */
 
@@ -27,8 +30,55 @@ const NOTIFY_TO = 'marc_wang@emers.com';
 const ORDER_HEAD = ['送出時間', '訂單編號', '經銷商／店名', '聯絡人', '電話', 'Email', '訂單備註', '款色數', '件數', '零售金額', '分店數', '分店', '狀態'];
 const LINE_HEAD = ['送出時間', '訂單編號', '經銷商／店名', '分店', '分頁', '月份', '款號', '色碼 SKU', '英文品名', '中文品名', '顏色', '尺寸', '數量', '台灣建議售價', '零售金額'];
 
-function doGet() {
+// 管理者金鑰存在「專案設定 → 指令碼屬性」的 ADMIN_KEY（不寫在程式裡）
+function adminOk_(key) {
+  const k = PropertiesService.getScriptProperties().getProperty('ADMIN_KEY');
+  return !!k && String(key || '') === k;
+}
+
+function doGet(e) {
+  const p = (e && e.parameter) || {};
+  if (p.action === 'list') {
+    if (!adminOk_(p.key)) return json_({ error: 'forbidden' });
+    return json_({ orders: listOrders_(SpreadsheetApp.getActiveSpreadsheet()) });
+  }
   return ContentService.createTextOutput('SDR FW27 收單程式運作中');
+}
+
+function json_(o) {
+  return ContentService.createTextOutput(JSON.stringify(o)).setMimeType(ContentService.MimeType.JSON);
+}
+
+// 給網站「訂單彙整」用：訂單＋明細
+function listOrders_(ss) {
+  const os = sheet_(ss, '訂單', ORDER_HEAD), ls = sheet_(ss, '明細', LINE_HEAD);
+  const on = os.getLastRow(), ln = ls.getLastRow();
+  if (on < 2) return [];
+  const H = h => ORDER_HEAD.indexOf(h);
+  const iso = v => v instanceof Date ? v.toISOString() : String(v || '');
+  const byOid = {};
+  (ln < 2 ? [] : ls.getRange(2, 1, ln - 1, LINE_HEAD.length).getValues()).forEach(r => {
+    (byOid[String(r[1])] = byOid[String(r[1])] || []).push({ branch: String(r[3] || ''), sheet: r[4], mon: r[5], style: r[6], sku: r[7], en: r[8], zh: r[9],
+      color: r[10], size: String(r[11]), qty: Number(r[12] || 0), price: Number(r[13] || 0) });
+  });
+  return os.getRange(2, 1, on - 1, ORDER_HEAD.length).getValues().filter(o => o[1]).map(o => ({
+    oid: String(o[1]), submittedAt: iso(o[0]), store: String(o[2] || ''), contact: String(o[3] || ''), phone: String(o[4] || ''),
+    email: String(o[5] || ''), note: String(o[6] || ''), styles: Number(o[H('款色數')] || 0), qty: Number(o[H('件數')] || 0),
+    amount: Number(o[H('零售金額')] || 0), status: String(o[H('狀態')] || '已送出'), lines: byOid[String(o[1])] || []
+  }));
+}
+
+// 管理者在網站改狀態（例如「已確認」）
+function setStatus_(ss, oid, status) {
+  const os = sheet_(ss, '訂單', ORDER_HEAD);
+  const row = findOid_(os, oid);
+  if (!row) return 'deleted';
+  os.getRange(row, ORDER_HEAD.indexOf('狀態') + 1).setValue(status);
+  const log = logSheet_(ss), n = log.getLastRow();
+  if (n) log.getRange(1, 1, n, 3).getValues().forEach(v => {
+    if (String(v[0]) === oid && v[2] && ss.getSheetByName(String(v[2]))) ss.getSheetByName(String(v[2])).getRange(9, 2).setValue(status);
+  });
+  return 'ok';
 }
 
 function doPost(e) {
@@ -36,6 +86,8 @@ function doPost(e) {
   lock.waitLock(30000);
   try {
     const d = JSON.parse(e.postData.contents);
+    if (d && d.action === 'cancel' && d.oid) return out_(cancel_(SpreadsheetApp.getActiveSpreadsheet(), String(d.oid)));
+    if (d && d.action === 'status' && d.oid) return out_(adminOk_(d.key) ? setStatus_(SpreadsheetApp.getActiveSpreadsheet(), String(d.oid), String(d.status || '已確認')) : 'forbidden');
     if (!d || !d.oid || !Array.isArray(d.lines)) return out_('invalid');
     const ss = SpreadsheetApp.getActiveSpreadsheet();
     const os = sheet_(ss, '訂單', ORDER_HEAD);
@@ -224,11 +276,41 @@ function rebuildOrderTabs() {
   });
 }
 
-function notify_(ss, d, rows, isEdit) {
+// 客人在「我的訂單」按刪除：從 訂單／明細 移除、刪掉該訂單分頁、寄取消通知（信裡保留原本明細）
+function cancel_(ss, oid) {
+  const os = sheet_(ss, '訂單', ORDER_HEAD), ls = sheet_(ss, '明細', LINE_HEAD), log = logSheet_(ss);
+  const row = findOid_(os, oid);
+  if (!row) return 'deleted';
+  const o = os.getRange(row, 1, 1, ORDER_HEAD.length).getValues()[0];
+  const H = h => ORDER_HEAD.indexOf(h);
+  if (String(o[H('狀態')]).trim() === '作廢') return 'void';
+  const ln = ls.getLastRow();
+  const rows = ln < 2 ? [] : ls.getRange(2, 1, ln - 1, LINE_HEAD.length).getValues().filter(r => String(r[1]) === oid);
+  removeOid_(os, oid);
+  removeOid_(ls, oid);
+  const n = log.getLastRow();
+  if (n) {
+    const vals = log.getRange(1, 1, n, 3).getValues();
+    for (let i = 0; i < vals.length; i++) if (String(vals[i][0]) === oid) {
+      const tab = vals[i][2] && ss.getSheetByName(String(vals[i][2]));
+      if (tab) ss.deleteSheet(tab);
+      log.getRange(i + 1, 3).setValue('');
+      break;
+    }
+  }
+  try {
+    notify_(ss, { oid: oid, store: o[2], contact: o[3], phone: o[4], email: o[5], note: o[6],
+      branches: String(o[H('分店')] || '').split('、').filter(Boolean).map(x => ({ name: x })),
+      styles: o[H('款色數')], qty: o[H('件數')], amount: o[H('零售金額')] }, rows, false, '訂單取消');
+  } catch (err) { console.error('notify failed: ' + err); }
+  return 'ok';
+}
+
+function notify_(ss, d, rows, isEdit, kindOverride) {
   if (!NOTIFY_TO) return;
   const esc = v => String(v == null ? '' : v).replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
   const fmt = n => Number(n || 0).toLocaleString('en-US');
-  const kind = isEdit ? '訂單修改' : '新訂單';
+  const kind = kindOverride || (isEdit ? '訂單修改' : '新訂單');
   const subject = `【SDR FW27 ${kind}】${d.store || '（未填店名）'}｜${fmt(d.qty)} 件｜NT$${fmt(d.amount)}`;
   // 依分店、款色彙整成一行一款：M×4 L×2
   const groups = {};
