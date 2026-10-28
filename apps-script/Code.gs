@@ -103,6 +103,7 @@ function doPost(e) {
       if (!acct) return out_('login_required');
       return out_(cancel_(SpreadsheetApp.getActiveSpreadsheet(), String(d.oid), acct));
     }
+    if (d && d.action === 'admin_delete' && d.oid) return out_(adminOk_(d.key) ? cancel_(SpreadsheetApp.getActiveSpreadsheet(), String(d.oid), '', true) : 'forbidden');
     if (d && d.action === 'status' && d.oid) return out_(adminOk_(d.key) ? setStatus_(SpreadsheetApp.getActiveSpreadsheet(), String(d.oid), String(d.status || '已確認')) : 'forbidden');
     if (d && d.action === 'admin_save') {
       if (!adminOk_(d.key)) return out_('forbidden');
@@ -328,7 +329,7 @@ function rebuildOrderTabs() {
 }
 
 // 客人在「我的訂單」按刪除：從 訂單／明細 移除、刪掉該訂單分頁、寄取消通知（信裡保留原本明細）
-function cancel_(ss, oid, acct) {
+function cancel_(ss, oid, acct, byAdmin) {
   const os = sheet_(ss, '訂單', ORDER_HEAD), ls = sheet_(ss, '明細', LINE_HEAD), log = logSheet_(ss);
   const row = findOid_(os, oid);
   if (!row) return 'deleted';
@@ -336,7 +337,7 @@ function cancel_(ss, oid, acct) {
   const H = h => ORDER_HEAD.indexOf(h);
   if (String(o[H('狀態')]).trim() === '作廢') return 'void';
   const owner = String(o[H('帳號 Email')] || '').toLowerCase();
-  if (owner && owner !== acct) return 'forbidden';
+  if (!byAdmin && owner && owner !== acct) return 'forbidden';
   const ln = ls.getLastRow();
   const rows = ln < 2 ? [] : ls.getRange(2, 1, ln - 1, LINE_HEAD.length).getValues().filter(r => String(r[1]) === oid);
   removeOid_(os, oid);
@@ -354,12 +355,12 @@ function cancel_(ss, oid, acct) {
   try {
     notify_(ss, { oid: oid, store: o[2], contact: o[3], phone: o[4], email: o[5], note: o[6],
       branches: String(o[H('分店')] || '').split('、').filter(Boolean).map(x => ({ name: x })),
-      styles: o[H('款色數')], qty: o[H('件數')], amount: o[H('零售金額')] }, rows, false, '訂單取消');
+      styles: o[H('款色數')], qty: o[H('件數')], amount: o[H('零售金額')] }, rows, false, byAdmin ? '訂單取消（業務刪除）' : '訂單取消');
   } catch (err) { console.error('notify failed: ' + err); }
   try {
     customerMail_({ oid: oid, store: o[2], contact: o[3], phone: o[4], email: o[5], note: o[6],
       branches: String(o[H('分店')] || '').split('、').filter(Boolean).map(x => ({ name: x })),
-      styles: o[H('款色數')], qty: o[H('件數')], amount: o[H('零售金額')] }, rows, '訂單已取消', owner || acct, null);
+      styles: o[H('款色數')], qty: o[H('件數')], amount: o[H('零售金額')] }, rows, byAdmin ? '訂單已由業務取消' : '訂單已取消', owner || acct, null);
   } catch (err) { console.error('customer mail failed: ' + err); }
   return 'ok';
 }
@@ -406,7 +407,9 @@ function notify_(ss, d, rows, isEdit, kindOverride, att) {
 // 寄給客人（帳號 Email）：訂單確認／已更新附 Excel 訂單本；取消只寄通知
 function customerMail_(d, rows, kind, to, att) {
   if (!to) return;
-  const intro = kind === '訂單已取消'
+  const intro = kind === '訂單已由業務取消'
+    ? 'SUN DAY RED 業務已取消這張訂單，以下是原本的內容供您留存。如有疑問請直接回覆此信。'
+    : kind === '訂單已取消'
     ? '您的這張訂單已經取消，以下是原本的內容供您留存。如非本人操作，請盡快聯絡 SUN DAY RED 業務。'
     : kind === '訂單已由業務調整'
     ? `SUN DAY RED 業務已依雙方討論調整這張訂單，以下是調整後的內容。${att ? '最新的 Excel 訂單本在附件。' : ''}如有疑問請直接回覆此信。`
