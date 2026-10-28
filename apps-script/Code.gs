@@ -20,6 +20,8 @@
  * - 隱藏分頁「_紀錄」記錄收過的訂單編號，請不要刪除
  *
  * 管理者檢視：網站網址加 ?admin=金鑰 就會出現「訂單彙整」（金鑰在 專案設定 → 指令碼屬性 ADMIN_KEY）
+ * 管理者編輯：訂單彙整按「編輯訂單」→ 改數量／分店／經銷商資料 → 送出。保留原下單帳號與狀態，
+ *   「最後修改」欄記錄「業務 時間」；可選擇是否寄「訂單已由業務調整」信給客人
  * 客人刪除：「我的訂單」按刪除 → 從 訂單／明細 移除、刪掉該訂單分頁、寄「訂單取消」信
  *
  * 登入：客人用 Email 收驗證碼登入後才能送單；每張單記錄「帳號 Email」，只有同一個帳號能修改／刪除
@@ -30,7 +32,7 @@
 
 const NOTIFY_TO = 'marc_wang@emers.com';
 
-const ORDER_HEAD = ['送出時間', '訂單編號', '經銷商／店名', '聯絡人', '電話', 'Email', '訂單備註', '款色數', '件數', '零售金額', '分店數', '分店', '狀態', '帳號 Email'];
+const ORDER_HEAD = ['送出時間', '訂單編號', '經銷商／店名', '聯絡人', '電話', 'Email', '訂單備註', '款色數', '件數', '零售金額', '分店數', '分店', '狀態', '帳號 Email', '最後修改'];
 const LINE_HEAD = ['送出時間', '訂單編號', '經銷商／店名', '分店', '分頁', '月份', '款號', '色碼 SKU', '英文品名', '中文品名', '顏色', '尺寸', '數量', '台灣建議售價', '零售金額'];
 
 // 管理者金鑰存在「專案設定 → 指令碼屬性」的 ADMIN_KEY（不寫在程式裡）
@@ -67,7 +69,8 @@ function listOrders_(ss) {
   return os.getRange(2, 1, on - 1, ORDER_HEAD.length).getValues().filter(o => o[1]).map(o => ({
     oid: String(o[1]), submittedAt: iso(o[0]), store: String(o[2] || ''), contact: String(o[3] || ''), phone: String(o[4] || ''),
     email: String(o[5] || ''), note: String(o[6] || ''), styles: Number(o[H('款色數')] || 0), qty: Number(o[H('件數')] || 0),
-    amount: Number(o[H('零售金額')] || 0), status: String(o[H('狀態')] || '已送出'), account: String(o[H('帳號 Email')] || '').toLowerCase(), lines: byOid[String(o[1])] || []
+    amount: Number(o[H('零售金額')] || 0), status: String(o[H('狀態')] || '已送出'), account: String(o[H('帳號 Email')] || '').toLowerCase(),
+    edited: String(o[H('最後修改')] || ''), lines: byOid[String(o[1])] || []
   }));
 }
 
@@ -101,55 +104,81 @@ function doPost(e) {
       return out_(cancel_(SpreadsheetApp.getActiveSpreadsheet(), String(d.oid), acct));
     }
     if (d && d.action === 'status' && d.oid) return out_(adminOk_(d.key) ? setStatus_(SpreadsheetApp.getActiveSpreadsheet(), String(d.oid), String(d.status || '已確認')) : 'forbidden');
+    if (d && d.action === 'admin_save') {
+      if (!adminOk_(d.key)) return out_('forbidden');
+      if (!d.oid || !Array.isArray(d.lines)) return out_('invalid');
+      return out_(saveOrder_(SpreadsheetApp.getActiveSpreadsheet(), d, '', true));
+    }
     if (!d || !d.oid || !Array.isArray(d.lines)) return out_('invalid');
     if (!acct) return out_('login_required');
-    const ss = SpreadsheetApp.getActiveSpreadsheet();
-    const os = sheet_(ss, '訂單', ORDER_HEAD);
-    const ls = sheet_(ss, '明細', LINE_HEAD);
-    const log = logSheet_(ss);
-    const seen = log.getLastRow() > 0 && log.getRange(1, 1, log.getLastRow(), 1).getValues().some(r => String(r[0]) === String(d.oid));
-    const row = findOid_(os, d.oid);
-    if (row && String(os.getRange(row, ORDER_HEAD.indexOf('狀態') + 1).getValue()).trim() === '作廢') return out_('void');
-    if (row) { const owner = String(os.getRange(row, ORDER_HEAD.indexOf('帳號 Email') + 1).getValue() || '').toLowerCase(); if (owner && owner !== acct) return out_('forbidden'); }
-    if (seen && !row) return out_('deleted');
-    if (!seen) log.appendRow([d.oid, new Date()]);
-    removeOid_(os, d.oid);
-    removeOid_(ls, d.oid);
-
-    const t = d.submittedAt ? new Date(d.submittedAt) : new Date();
-    const branches = Array.isArray(d.branches) ? d.branches : [];
-    os.appendRow([t, d.oid, d.store || '', d.contact || '', d.phone || '', d.email || '', d.note || '',
-      d.styles || 0, d.qty || 0, d.amount || 0, branches.length || '', branches.map(b => b.name).join('、'), d.status || '已送出', acct]);
-
-    const info = {};
-    d.lines.forEach(l => { info[l.k] = l; });
-    const rows = [];
-    const push = (branch, l, qty) => {
-      const x = info[l.k] || l;
-      rows.push([t, d.oid, d.store || '', branch, x.sheet || '', x.mon || '', x.style || '', x.sku || '', x.en || '', x.zh || '', x.color || '',
-        l.size, qty, x.price || 0, qty * (x.price || 0)]);
-    };
-    if (branches.length) {
-      branches.forEach(b => (b.lines || []).forEach(l => push(b.name, l, l.qty)));
-    } else {
-      d.lines.forEach(l => push('', l, l.qty));
-    }
-    if (rows.length) ls.getRange(ls.getLastRow() + 1, 1, rows.length, LINE_HEAD.length).setValues(rows);
-    try {
-      writeOrderTab_(ss, log, d.oid, { t: t, store: d.store, contact: d.contact, phone: d.phone, email: d.email, note: d.note,
-        branches: branches.map(b => b.name).join('、'), styles: d.styles, qty: d.qty, amount: d.amount, status: d.status || '已送出' }, rows);
-    } catch (err) { console.error('order tab failed: ' + err); }
-    d.account = acct;
-    let att = null;
-    try { if (d._xlsx) att = Utilities.newBlob(Utilities.base64Decode(d._xlsx), 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet', String(d._xlsxName || ('SDR_FW27_訂單本_' + d.oid + '.xlsx'))); } catch (err) { console.error('xlsx decode failed: ' + err); }
-    try { notify_(ss, d, rows, seen, null, att); } catch (err) { console.error('notify failed: ' + err); }
-    try { customerMail_(d, rows, seen ? '訂單已更新' : '訂單確認', acct, att); } catch (err) { console.error('customer mail failed: ' + err); }
-    return out_('ok');
+    return out_(saveOrder_(SpreadsheetApp.getActiveSpreadsheet(), d, acct, false));
   } catch (err) {
     return out_('error: ' + err);
   } finally {
     lock.releaseLock();
   }
+}
+
+// 寫入一張訂單（客人送出／修改，或管理者編輯）
+// 管理者編輯：不看登入帳號，保留原本的「帳號 Email」「送出時間」「狀態」，最後修改記「業務」
+function saveOrder_(ss, d, acct, byAdmin) {
+  const os = sheet_(ss, '訂單', ORDER_HEAD);
+  const ls = sheet_(ss, '明細', LINE_HEAD);
+  const log = logSheet_(ss);
+  const H = h => ORDER_HEAD.indexOf(h);
+  const seen = log.getLastRow() > 0 && log.getRange(1, 1, log.getLastRow(), 1).getValues().some(r => String(r[0]) === String(d.oid));
+  const row = findOid_(os, d.oid);
+  const prev = row ? os.getRange(row, 1, 1, ORDER_HEAD.length).getValues()[0] : null;
+  if (prev && String(prev[H('狀態')]).trim() === '作廢') return 'void';
+  if (byAdmin) {
+    if (!prev) return 'deleted';
+    acct = String(prev[H('帳號 Email')] || '').toLowerCase();
+  } else if (prev) {
+    const owner = String(prev[H('帳號 Email')] || '').toLowerCase();
+    if (owner && owner !== acct) return 'forbidden';
+  }
+  if (seen && !row) return 'deleted';
+  if (!seen) log.appendRow([d.oid, new Date()]);
+  removeOid_(os, d.oid);
+  removeOid_(ls, d.oid);
+
+  const now = new Date();
+  const t = byAdmin ? (prev[0] instanceof Date ? prev[0] : new Date(prev[0] || now)) : (d.submittedAt ? new Date(d.submittedAt) : now);
+  const status = byAdmin ? (String(prev[H('狀態')] || '').trim() || '已送出') : (d.status || '已送出');
+  const edited = byAdmin ? '業務 ' + Utilities.formatDate(now, 'Asia/Taipei', 'yyyy/MM/dd HH:mm') : (seen ? '客人 ' + Utilities.formatDate(now, 'Asia/Taipei', 'yyyy/MM/dd HH:mm') : '');
+  const branches = Array.isArray(d.branches) ? d.branches : [];
+  os.appendRow([t, d.oid, d.store || '', d.contact || '', d.phone || '', d.email || '', d.note || '',
+    d.styles || 0, d.qty || 0, d.amount || 0, branches.length || '', branches.map(b => b.name).join('、'), status, acct, edited]);
+
+  const info = {};
+  d.lines.forEach(l => { info[l.k] = l; });
+  const rows = [];
+  const push = (branch, l, qty) => {
+    const x = info[l.k] || l;
+    rows.push([t, d.oid, d.store || '', branch, x.sheet || '', x.mon || '', x.style || '', x.sku || '', x.en || '', x.zh || '', x.color || '',
+      l.size, qty, x.price || 0, qty * (x.price || 0)]);
+  };
+  if (branches.length) {
+    branches.forEach(b => (b.lines || []).forEach(l => push(b.name, l, l.qty)));
+  } else {
+    d.lines.forEach(l => push('', l, l.qty));
+  }
+  if (rows.length) ls.getRange(ls.getLastRow() + 1, 1, rows.length, LINE_HEAD.length).setValues(rows);
+  try {
+    writeOrderTab_(ss, log, d.oid, { t: t, store: d.store, contact: d.contact, phone: d.phone, email: d.email, note: d.note,
+      branches: branches.map(b => b.name).join('、'), styles: d.styles, qty: d.qty, amount: d.amount, status: status }, rows);
+  } catch (err) { console.error('order tab failed: ' + err); }
+  d.account = acct;
+  let att = null;
+  try { if (d._xlsx) att = Utilities.newBlob(Utilities.base64Decode(d._xlsx), 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet', String(d._xlsxName || ('SDR_FW27_訂單本_' + d.oid + '.xlsx'))); } catch (err) { console.error('xlsx decode failed: ' + err); }
+  if (byAdmin) {
+    try { notify_(ss, d, rows, true, '訂單修改（業務）', att); } catch (err) { console.error('notify failed: ' + err); }
+    if (d.notifyCustomer !== false) { try { customerMail_(d, rows, '訂單已由業務調整', acct, att); } catch (err) { console.error('customer mail failed: ' + err); } }
+  } else {
+    try { notify_(ss, d, rows, seen, null, att); } catch (err) { console.error('notify failed: ' + err); }
+    try { customerMail_(d, rows, seen ? '訂單已更新' : '訂單確認', acct, att); } catch (err) { console.error('customer mail failed: ' + err); }
+  }
+  return 'ok';
 }
 
 function sheet_(ss, name, head) {
@@ -379,6 +408,8 @@ function customerMail_(d, rows, kind, to, att) {
   if (!to) return;
   const intro = kind === '訂單已取消'
     ? '您的這張訂單已經取消，以下是原本的內容供您留存。如非本人操作，請盡快聯絡 SUN DAY RED 業務。'
+    : kind === '訂單已由業務調整'
+    ? `SUN DAY RED 業務已依雙方討論調整這張訂單，以下是調整後的內容。${att ? '最新的 Excel 訂單本在附件。' : ''}如有疑問請直接回覆此信。`
     : `感謝您的訂購，${kind === '訂單已更新' ? '訂單已更新為以下內容' : '我們已收到您的訂單'}。${att ? '完整的 Excel 訂單本在附件。' : ''}如需修改或刪除，請到下單網站的「我的訂單」操作。`;
   const html = orderHtml_(d, rows, kind, intro, '<p style="color:#888;font-size:12px">此信由系統自動寄出，有任何問題請直接回覆此信或聯絡 SUN DAY RED 業務。</p>');
   const msg = { to: to, subject: `【SUN DAY RED FW27】${kind}｜${d.oid}`, htmlBody: html, name: 'SUN DAY RED 台灣', replyTo: NOTIFY_TO.split(',')[0].trim() };

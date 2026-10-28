@@ -235,6 +235,11 @@ tfoot td{font-weight:700;background:var(--sunk)}
 .oc .acts{grid-row:1/3;grid-column:2;display:flex;gap:6px;flex-wrap:wrap;justify-content:flex-end}
 .pill{display:inline-block;font-size:11px;padding:1px 8px;border-radius:999px;background:var(--sunk);color:var(--muted);margin-left:6px;vertical-align:middle}
 .pill.ok{background:var(--ok-soft);color:var(--ok)}
+.aebar{display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin:12px 0 0;padding:10px 14px;border:1.5px solid var(--brand);border-radius:8px;background:color-mix(in srgb,var(--brand) 8%,transparent)}
+.aebar b{color:var(--brand)}
+.aebar span{flex:1;min-width:220px;font-size:13px}
+.chk{display:flex;gap:8px;align-items:flex-start;font-size:13px;margin:4px 0}
+.chk input{margin-top:3px}
 .kpis{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:10px}
 .kpi{background:var(--surface);border:1px solid var(--line);border-radius:var(--r);padding:10px 12px}
 .kpi small{color:var(--muted);font-size:12px}
@@ -294,6 +299,7 @@ tfoot td{font-weight:700;background:var(--sunk)}
 <section id="view-order">
   <div class="wrap">
     <div class="offbar" id="offbar" hidden><b>傳單下單</b><span>照常挑款、填數量，完成後按右下角「檢視並下載」。能下載就會存成 Excel 訂單本；不能下載時會改成「複製」，貼到 Excel 或 LINE 傳給 SDR 業務即可。</span></div>
+    <div class="aebar" id="aebar" hidden><b>業務編輯中</b><span id="ae-txt"></span><button class="btn sm" id="ae-cancel">取消編輯</button></div>
     <div class="acct" id="acct" hidden></div>
     <div class="dealer">
       <div class="fld"><label for="d-store">經銷商／店名 <span class="req">*</span></label><input id="d-store" autocomplete="organization"></div>
@@ -373,6 +379,9 @@ tfoot td{font-weight:700;background:var(--sunk)}
     async verify(email,code){ const t=await post({action:'otp_verify',email,code}); let j; try{ j=JSON.parse(t); }catch(e){ j={error:t}; } if(j.token){ try{ localStorage.setItem(AKEY,JSON.stringify({email:j.email,token:j.token})); }catch(e){} refreshMine(); } return j; },
     logout(){ try{ localStorage.removeItem(AKEY); }catch(e){} SRV=[]; emit(); } };
   const KNOWN=['login_required','forbidden'];
+  window.SDR_ADMIN={ on:!!ADMIN,
+    async save(body){ const res=await post({...body,action:'admin_save',key:ADMIN}); delete body._xlsx; delete body._xlsxName;
+      if(res==='ok'||/<html/i.test(res)) return; const err=new Error(res==='forbidden'?'管理金鑰不正確':res==='deleted'?'這張訂單已不在試算表（客人可能已刪除）':res==='void'?'這張訂單已作廢':res); err.code=res; throw err; } };
   const db={ doc(path){ const p=path.split('/'); return { async set(body){ if(p.length===4&&p[2]==='subs'){ const res=await post({...body,auth:auth()}); delete body._xlsx; delete body._xlsxName; if(KNOWN.includes(res)){ const err=new Error(res); err.code=res; throw err; } if(res==='deleted'||res==='void'){ try{ localStorage.setItem(HKEY,JSON.stringify(hist().filter(x=>x.oid!==body.oid))); }catch(e){} emit(); const err=new Error('order_closed'); err.code='order_closed'; throw err; } if(res&&res!=='ok'&&!/<html/i.test(res)) { const err=new Error(res); err.code='server'; throw err; } const h=hist().filter(x=>x.oid!==body.oid); h.push(body); try{ localStorage.setItem(HKEY,JSON.stringify(h)); }catch(e){} SRV=SRV.filter(x=>x.oid!==body.oid); emit(); refreshMine(); } }, async update(body){ if(p.length===4&&p[2]==='subs'&&ADMIN&&body&&body.status){ const res=await post({action:'status',oid:p[3],status:body.status,key:ADMIN}); if(res!=='ok'){ const err=new Error(res==='forbidden'?'管理金鑰不正確':res==='deleted'?'這張訂單已不在試算表':res); err.code=res; throw err; } if(ACACHE[p[3]]) ACACHE[p[3]].status=body.status; } }, async delete(){ if(p.length===4&&p[2]==='subs'){ const res=await post({action:'cancel',oid:p[3],auth:auth()}); if(KNOWN.includes(res)){ const err=new Error(res); err.code=res; throw err; } if(res&&res!=='ok'&&res!=='deleted'&&res!=='void'&&!/<html/i.test(res)){ const err=new Error(res); err.code='server'; throw err; } try{ localStorage.setItem(HKEY,JSON.stringify(hist().filter(x=>x.oid!==p[3]))); }catch(e){} SRV=SRV.filter(x=>x.oid!==p[3]); emit(); } }, async get(){ return {exists:false,data:()=>undefined}; } }; },
     collection(path){ const parts=String(path||'').split('/');
       if(path==='orders'){ const q={ orderBy(){ return q; }, limit(){ return q; }, where(){ return q; },
@@ -400,10 +409,11 @@ const esc = s=>String(s??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':
 
 // ---------- state ----------
 const DRAFT_KEY='sdr-fw27-draft-v1';
-let S = {sheet:'服裝-男', months:new Set(), q:'', only:false, qty:{}, dealer:{store:'',contact:'',phone:'',email:'',note:''}, editing:null, open:new Set(), pic:{}, chain:false, br:[], bq:{}, cur:null};
-try{ const d=JSON.parse(localStorage.getItem(DRAFT_KEY)||'null'); if(d){ S.qty=d.qty||{}; S.dealer=Object.assign(S.dealer,d.dealer||{}); S.editing=d.editing||null; if(d.chain&&Array.isArray(d.br)&&d.br.length){ S.chain=true; S.br=d.br; S.bq=d.bq||{}; S.cur=S.br.some(b=>b.id===d.cur)?d.cur:S.br[0].id; } } }catch(e){}
+let S = {sheet:'服裝-男', months:new Set(), q:'', only:false, qty:{}, dealer:{store:'',contact:'',phone:'',email:'',note:''}, editing:null, admin:null, open:new Set(), pic:{}, chain:false, br:[], bq:{}, cur:null};
+try{ const d=JSON.parse(localStorage.getItem(DRAFT_KEY)||'null'); if(d){ S.qty=d.qty||{}; S.dealer=Object.assign(S.dealer,d.dealer||{}); S.editing=d.editing||null; S.admin=d.admin||null; if(d.chain&&Array.isArray(d.br)&&d.br.length){ S.chain=true; S.br=d.br; S.bq=d.bq||{}; S.cur=S.br.some(b=>b.id===d.cur)?d.cur:S.br[0].id; } } }catch(e){}
 let saveT=null;
-function saveDraft(){ clearTimeout(saveT); saveT=setTimeout(()=>{ try{ localStorage.setItem(DRAFT_KEY,JSON.stringify({qty:S.qty,dealer:S.dealer,editing:S.editing,chain:S.chain,br:S.br,bq:S.bq,cur:S.cur})); }catch(e){} },300); }
+function adminEditing(){ return !!(S.admin&&S.editing&&S.admin.oid===S.editing&&window.SDR_ADMIN?.on); }
+function saveDraft(){ clearTimeout(saveT); saveT=setTimeout(()=>{ try{ localStorage.setItem(DRAFT_KEY,JSON.stringify({qty:S.qty,dealer:S.dealer,editing:S.editing,admin:S.admin,chain:S.chain,br:S.br,bq:S.bq,cur:S.cur})); }catch(e){} },300); }
 
 // ---- chain stores ----
 function sumQ(m){ let t=0; for(const id in m||{}) for(const z in m[id]) t+=m[id][z]||0; return t; }
@@ -519,7 +529,8 @@ function renderList(){
 function renderTally(){
   const t=totals();
   $('#t-qtyl').textContent=S.chain?'全部分店件數':'件數'; $('#t-sty').textContent=t.sty; $('#t-qty').textContent=fmt(t.qty); $('#t-amt').textContent=fmt(t.amt);
-  $('#t-edit').hidden=!S.editing; $('#t-eid').textContent=S.editing||'';
+  $('#t-edit').hidden=!S.editing; $('#t-eid').textContent=S.editing||''; $('#t-edit small').textContent=adminEditing()?'業務編輯中':'編輯中';
+  const ae=adminEditing(); $('#aebar').hidden=!ae; if(renderTally._ae!==ae){ renderTally._ae=ae; renderAcct(); } if(ae) $('#ae-txt').textContent=`${S.admin.store||''}｜${S.editing}｜下單帳號 ${S.admin.account||'（無）'}。改好數量、分店或經銷商資料後，按右下「檢視並送出」→「儲存修改」。`;
   $('#t-br').hidden=!S.chain; if(S.chain){ $('#t-brn').textContent='分店數'; $('#t-brq').textContent=S.br.length; }
   $('#b-review').disabled=!t.qty;
 }
@@ -627,20 +638,21 @@ function openReview(){
   const L=lines(S.qty); const t=totals();
   const rows=L.map(l=>`<tr><td>${esc(l.zh||l.en)}<div class="code">${esc(l.style)} ／ ${esc(l.sku)}</div></td><td>${esc(l.color)}</td><td>${esc(l.size)}</td><td class="r num">${l.qty}</td><td class="r num">${fmt(l.qty*l.price)}</td></tr>`).join('');
   $('#overlay').innerHTML=`<div class="scrim"><div class="panel" role="dialog" aria-label="檢視訂單">
-    <div class="phead"><h2>${S.editing?'更新訂單':'檢視訂單'}</h2><button class="btn sm x" data-close>關閉</button></div>
+    <div class="phead"><h2>${adminEditing()?'業務編輯訂單':S.editing?'更新訂單':'檢視訂單'}</h2><button class="btn sm x" data-close>關閉</button></div>
     <div class="kpis"><div class="kpi"><small>款色</small><b>${t.sty}</b></div><div class="kpi"><small>件數</small><b>${fmt(t.qty)}</b></div><div class="kpi"><small>零售金額 TWD</small><b>${fmt(t.amt)}</b></div><div class="kpi"><small>經銷商</small><b style="font-family:var(--f-body);font-size:15px">${esc(S.dealer.store||'—')}</b></div></div>
     ${overviewHTML(L)}
     ${branchTableHTML()}
     <div class="tbl"><table><thead><tr><th>品名</th><th>顏色</th><th>尺寸</th><th class="r">數量</th><th class="r">零售金額</th></tr></thead><tbody>${rows}</tbody><tfoot><tr><td colspan="3">合計</td><td class="r num">${fmt(t.qty)}</td><td class="r num">${fmt(t.amt)}</td></tr></tfoot></table></div>
+    ${adminEditing()?`<label class="chk"><input type="checkbox" id="ae-notify" checked><span>寄「訂單已由業務調整」通知和新的 Excel 訂單本給客人${S.admin.account?'（'+esc(S.admin.account)+'）':''}。不勾就只更新試算表，通知信只寄給你。</span></label>`:''}
     <div id="sub-msg"></div>
     <div style="display:flex;gap:8px;justify-content:flex-end;flex-wrap:wrap">
       <button class="btn" id="b-csv">下載 CSV</button>
       <button class="btn" id="b-xls">下載 Excel</button>
-      <button class="btn pri" id="b-submit">${OFF?'下載 Excel 訂單本':(S.editing?'更新並送出':'送出訂單')}</button>
+      <button class="btn pri" id="b-submit">${adminEditing()?'儲存修改':OFF?'下載 Excel 訂單本':(S.editing?'更新並送出':'送出訂單')}</button>
     </div></div></div>`;
   $('#b-csv').onclick=async()=>{ try{ await saveCSV(`SDR_FW27_${S.dealer.store||'訂單'}.csv`,[CSV_HEAD,...csvRows({...S.dealer,oid:S.editing||'草稿',submittedAt:null,lines:L})]); }catch(e){ if(e?.code!=='declined'&&e?.code!=='cancelled') msg('#sub-msg','err',e.message||'下載未完成'); } };
   $('#b-xls').onclick=async()=>{ const b=$('#b-xls'); b.disabled=true; b.textContent='產生中…'; try{ await exportBook(S.qty,{...S.dealer,oid:S.editing,branches:branchesForExport()}); }catch(e){ if(e?.code!=='declined'&&e?.code!=='cancelled') msg('#sub-msg','err',e.message||'下載未完成'); } b.disabled=false; b.textContent='下載 Excel'; };
-  $('#b-submit').onclick=OFF?offlineDownload:submit;
+  $('#b-submit').onclick=adminEditing()?adminSubmit:OFF?offlineDownload:submit;
   if(OFF) $('#sub-msg').innerHTML='<div class="msg info">這個帳號無法線上送出。按下方按鈕取得訂單本（或複製內容），再用 LINE 或 Email 傳給 SDR 業務即可。</div>';
 }
 async function offlineDownload(){
@@ -678,7 +690,7 @@ function msg(sel,kind,text){ const el=$(sel); if(el) el.innerHTML=`<div class="m
 // ---------- Email 登入（GitHub 版才有） ----------
 const AUTH=window.SDR_AUTH||null; let acctStep='email', acctEmail='';
 function renderAcct(note,kind){
-  const box=$('#acct'); if(!AUTH){ box.hidden=true; return; } box.hidden=false;
+  const box=$('#acct'); if(!AUTH||adminEditing()){ box.hidden=true; return; } box.hidden=false;
   const a=AUTH.get(); const m=note?`<div class="am ${kind==='err'?'err':''}">${esc(note)}</div>`:'';
   if(a){ box.className='acct'; box.innerHTML=`<span class="t">已登入：<b>${esc(a.email)}</b>　訂單確認信與 Excel 訂單本會寄到這個信箱。</span><button class="btn sm" id="ac-out">登出</button>${m}`;
     if(!S.dealer.email){ S.dealer.email=a.email; $('#d-email').value=a.email; saveDraft(); } return; }
@@ -731,6 +743,43 @@ async function submit(){
     msg('#sub-msg','err', e?.code==='login_required'?'請先用 Email 登入再送出，數量都還在。':e?.code==='forbidden'?'這張訂單是用其他帳號下的，目前帳號不能修改。':e?.code==='invalid_argument'?'你的帳號目前沒有下單權限。請聯絡 SDR 業務開啟權限，或先下載 CSV 寄出。':'送出沒有成功（'+(e?.code||e?.message||'未知錯誤')+'）。數量都還在，請稍後再試。');
     btn.disabled=false; btn.textContent=S.editing?'更新並送出':'送出訂單';
   }
+}
+
+// ---------- 業務編輯訂單 ----------
+function snapForm(){ return JSON.parse(JSON.stringify({qty:S.qty,dealer:S.dealer,editing:S.editing,chain:S.chain,br:S.br,bq:S.bq,cur:S.cur})); }
+function loadOrderToForm(o){
+  S.qty={}; let miss=0; for(const l of o.lines||[]){ if(!BY[l.k]){ miss++; continue; } (S.qty[l.k]=S.qty[l.k]||{})[l.size]=l.qty; }
+  S.chain=false; S.br=[]; S.bq={}; S.cur=null;
+  if(o.branches&&o.branches.length){ S.chain=true; S.br=o.branches.map(b=>({id:brId(),name:b.name})); S.br.forEach((b,i)=>{ S.bq[b.id]=qtyFromLines(o.branches[i].lines); }); S.cur=S.br[0].id; recalcAgg(); }
+  S.dealer={store:o.store||'',contact:o.contact||'',phone:o.phone||'',email:o.email||'',note:o.note||''}; ['store','contact','phone','email','note'].forEach(k=>$('#d-'+k).value=S.dealer[k]);
+  S.editing=o.oid; return miss;
+}
+function exitAdminEdit(){
+  const prev=S.admin&&S.admin.prev; S.admin=null;
+  if(prev){ S.qty=prev.qty||{}; S.dealer=Object.assign({store:'',contact:'',phone:'',email:'',note:''},prev.dealer||{}); S.editing=prev.editing||null; S.chain=!!prev.chain; S.br=prev.br||[]; S.bq=prev.bq||{}; S.cur=prev.cur||null; }
+  else { S.qty={}; S.bq={}; S.br=[]; S.chain=false; S.cur=null; S.editing=null; S.dealer={store:'',contact:'',phone:'',email:'',note:''}; }
+  ['store','contact','phone','email','note'].forEach(k=>$('#d-'+k).value=S.dealer[k]||'');
+  saveDraft(); renderAll();
+}
+function reloadAdmin(){ if(adminUnsub){ adminUnsub(); adminUnsub=null; } setView('admin'); }
+$('#ae-cancel').addEventListener('click',()=>{ exitAdminEdit(); reloadAdmin(); });
+async function adminSubmit(){
+  if(!S.dealer.store.trim()||!S.dealer.contact.trim()){ msg('#sub-msg','err','「經銷商／店名」和「聯絡人」不能空白。'); return; }
+  if(!totals().qty){ msg('#sub-msg','err','數量是 0。要取消整張訂單，請請客人從「我的訂單」刪除，或到試算表把狀態改成「作廢」。'); return; }
+  const btn=$('#b-submit'); btn.disabled=true;
+  const L=lines(S.qty); const t=totals(); const oid=S.editing; const notifyCustomer=!!$('#ae-notify')?.checked;
+  const body={oid,store:S.dealer.store.trim(),contact:S.dealer.contact.trim(),phone:S.dealer.phone.trim(),email:S.dealer.email.trim(),note:S.dealer.note.trim(),
+    lines:L,styles:t.sty,qty:t.qty,amount:t.amt,notifyCustomer};
+  if(S.chain&&S.br.length) body.branches=S.br.map(b=>({name:b.name,lines:lines(S.bq[b.id]||{}).map(l=>({k:l.k,size:l.size,qty:l.qty}))}));
+  btn.textContent='產生訂單本…'; const brs=branchesForExport(); const meta={...S.dealer,oid,branches:brs,_mode:brs&&brs.length?'chain':undefined};
+  const b64=await xlsxForMail(S.qty,meta); if(b64){ body._xlsx=b64; body._xlsxName=`SDR_FW27_訂單本${meta._mode==='chain'?'_連鎖':''}_${(body.store||'經銷商').replace(/[\\/:*?"<>|]/g,'')}_${oid}.xlsx`; }
+  btn.textContent='儲存中…';
+  try{
+    await window.SDR_ADMIN.save(body);
+    const acc=S.admin&&S.admin.account; exitAdminEdit();
+    $('#overlay').innerHTML=`<div class="scrim"><div class="panel" style="height:auto;margin:auto;max-width:440px;border-radius:8px"><h2>修改已儲存</h2><div class="msg ok">訂單 <b class="num">${esc(oid)}</b>：${t.sty} 款色、${fmt(t.qty)} 件，零售金額 ${fmt(t.amt)}。</div><p style="margin:0;color:var(--muted)">試算表的訂單、明細和店名分頁都已更新。${notifyCustomer&&acc?'調整通知和 Excel 已寄給 <b>'+esc(acc)+'</b>。':'這次沒有通知客人。'}</p><div style="display:flex;justify-content:flex-end"><button class="btn pri" data-close>回訂單彙整</button></div></div></div>`;
+    reloadAdmin();
+  }catch(e){ msg('#sub-msg','err','儲存沒有成功（'+(e?.message||e?.code||'未知錯誤')+'）。改好的數量都還在，請稍後再試。'); btn.disabled=false; btn.textContent='儲存修改'; }
 }
 
 // ---------- views ----------
@@ -810,13 +859,21 @@ function renderAdmin(){
   <div style="display:flex;gap:8px;margin-top:12px;flex-wrap:wrap"><button class="btn" id="a-csv-all" ${os.length?'':'disabled'}>下載全部明細 CSV</button><button class="btn" id="a-csv-sku" ${os.length?'':'disabled'}>下載款色彙總 CSV</button></div>
   <div id="admin-msg" style="margin-top:10px"></div>
   <div class="section-title">各經銷商訂單</div>
-  ${os.length?'<div class="cards">'+os.map(o=>`<div class="oc"><h3>${esc(o.store)} <span class="num" style="font-weight:400;color:var(--muted);font-size:13px">${esc(o.oid)}</span><span class="pill ${o.status==='已確認'?'ok':''}">${esc(o.status||'已送出')}</span>${o.branches&&o.branches.length?`<span class="pill">連鎖 ${o.branches.length} 店</span>`:''}</h3><div class="sub">${esc(o.contact)}${o.phone?' ・ '+esc(o.phone):''}${o.email?' ・ '+esc(o.email):''} ・ ${fmtTime(o.submittedAt)} ・ ${o.styles} 款色 ・ <b>${fmt(o.qty)}</b> 件 ・ 零售 <b>${fmt(o.amount)}</b>${o.note?`<br>備註：${esc(o.note)}`:''}</div><div class="acts"><button class="btn sm" data-adet="${esc(o.uid)}|${esc(o.oid)}">${ADET.has(o.oid)?'收起明細':'看明細'}</button><button class="btn sm" data-axls="${esc(o.uid)}|${esc(o.oid)}">Excel</button><button class="btn sm" data-acsv="${esc(o.uid)}|${esc(o.oid)}">CSV</button>${o.status==='已確認'?'':`<button class="btn sm pri" data-ok="${esc(o.uid)}|${esc(o.oid)}">標記已確認</button>`}</div>${ADET.has(o.oid)?orderDetailHTML(o):''}</div>`).join('')+'</div>':'<div class="msg info">經銷商送出的訂單會即時出現在這裡。把頁面分享給經銷商（Contributor 權限）就能開始收單。</div>'}
+  ${os.length?'<div class="cards">'+os.map(o=>`<div class="oc"><h3>${esc(o.store)} <span class="num" style="font-weight:400;color:var(--muted);font-size:13px">${esc(o.oid)}</span><span class="pill ${o.status==='已確認'?'ok':''}">${esc(o.status||'已送出')}</span>${o.branches&&o.branches.length?`<span class="pill">連鎖 ${o.branches.length} 店</span>`:''}</h3><div class="sub">${esc(o.contact)}${o.phone?' ・ '+esc(o.phone):''}${o.email?' ・ '+esc(o.email):''} ・ ${fmtTime(o.submittedAt)} ・ ${o.styles} 款色 ・ <b>${fmt(o.qty)}</b> 件 ・ 零售 <b>${fmt(o.amount)}</b>${o.note?`<br>備註：${esc(o.note)}`:''}${o.edited?`<br><span style="color:var(--muted)">最後修改：${esc(o.edited)}</span>`:''}</div><div class="acts"><button class="btn sm" data-aedit="${esc(o.uid)}|${esc(o.oid)}">編輯訂單</button><button class="btn sm" data-adet="${esc(o.uid)}|${esc(o.oid)}">${ADET.has(o.oid)?'收起明細':'看明細'}</button><button class="btn sm" data-axls="${esc(o.uid)}|${esc(o.oid)}">Excel</button><button class="btn sm" data-acsv="${esc(o.uid)}|${esc(o.oid)}">CSV</button>${o.status==='已確認'?'':`<button class="btn sm pri" data-ok="${esc(o.uid)}|${esc(o.oid)}">標記已確認</button>`}</div>${ADET.has(o.oid)?orderDetailHTML(o):''}</div>`).join('')+'</div>':'<div class="msg info">經銷商送出的訂單會即時出現在這裡。把頁面分享給經銷商（Contributor 權限）就能開始收單。</div>'}
   ${aggRows.length?`<div class="section-title">款色彙總</div><div class="tbl"><table><thead><tr><th>分頁</th><th>品名</th><th>顏色</th><th>尺寸分布</th><th class="r">店數</th><th class="r">件數</th><th class="r">零售金額</th></tr></thead><tbody>${aggRows.map(a=>`<tr><td>${esc(a.l.sheet)}</td><td>${esc(a.l.zh||a.l.en)}<div class="code">${esc(a.l.style)} ／ ${esc(a.l.sku)}</div></td><td>${esc(a.l.color)}</td><td class="num" style="font-size:12px">${Object.entries(a.sz).map(([k,v])=>esc(k)+':'+v).join(' ')}</td><td class="r num">${a.stores.size}</td><td class="r num">${a.qty}</td><td class="r num">${fmt(a.qty*a.l.price)}</td></tr>`).join('')}</tbody></table></div>`:''}`;
   $('#a-csv-all').onclick=async()=>{ try{ await saveCSV('SDR_FW27_全部訂單明細.csv',[CSV_HEAD,...os.flatMap(csvRows)]); }catch(e){ if(e?.code!=='declined'&&e?.code!=='cancelled') msg('#admin-msg','err',e.message||'下載未完成'); } };
   $('#a-csv-sku').onclick=async()=>{ const sizesAll=[]; aggRows.forEach(a=>Object.keys(a.sz).forEach(s=>{ if(!sizesAll.includes(s)) sizesAll.push(s); })); try{ await saveCSV('SDR_FW27_款色彙總.csv',[['分頁','月份','款號','色碼 SKU','英文品名','中文品名','顏色','店數','件數','台灣建議售價','零售金額',...sizesAll],...aggRows.map(a=>[a.l.sheet,a.l.mon,a.l.style,a.l.sku,a.l.en,a.l.zh,a.l.color,a.stores.size,a.qty,a.l.price,a.qty*a.l.price,...sizesAll.map(s=>a.sz[s]||'')])]); }catch(e){ if(e?.code!=='declined'&&e?.code!=='cancelled') msg('#admin-msg','err',e.message||'下載未完成'); } };
 }
 $('#admin').addEventListener('click',async e=>{
   const c=e.target.closest('[data-acsv]'); const ok=e.target.closest('[data-ok]'); const ax=e.target.closest('[data-axls]');
+  const ae=e.target.closest('[data-aedit]');
+  if(ae){ const [u,id]=ae.dataset.aedit.split('|'); const o=(adminOrders[u]||[]).find(x=>x.oid===id); if(!o) return;
+    if(!window.SDR_ADMIN?.on){ msg('#admin-msg','err','請用含管理金鑰的網址（?admin=…）開啟頁面再編輯。'); return; }
+    const prev=adminEditing()?(S.admin.prev||null):snapForm();
+    const miss=loadOrderToForm(o); S.admin={oid:o.oid,account:o.account||'',store:o.store||'',prev}; saveDraft();
+    S.only=true; $('#only').checked=true; renderAll(); setView('order');
+    if(miss) alert(`這張單有 ${miss} 筆品項在目前商品資料找不到，編輯畫面不會顯示，儲存後會被移除。若不要移除，請按「取消編輯」。`);
+    return; }
   const dt=e.target.closest('[data-adet]'); if(dt){ const id=dt.dataset.adet.split('|')[1]; ADET.has(id)?ADET.delete(id):ADET.add(id); renderAdmin(); return; }
   if(ax){ const [u,id]=ax.dataset.axls.split('|'); const o=(adminOrders[u]||[]).find(x=>x.oid===id); ax.disabled=true; try{ await exportBook(qtyFromLines(o.lines),{...o,branches:branchesFromOrder(o)}); }catch(err){ if(err?.code!=='declined'&&err?.code!=='cancelled') msg('#admin-msg','err',err.message||'下載未完成'); } ax.disabled=false; return; }
   if(c){ const [u,id]=c.dataset.acsv.split('|'); const o=(adminOrders[u]||[]).find(x=>x.oid===id); try{ await saveCSV(`SDR_FW27_${o.store}_${o.oid}.csv`,[CSV_HEAD,...csvRows(o)]); }catch(err){ if(err?.code!=='declined'&&err?.code!=='cancelled') msg('#admin-msg','err',err.message||'下載未完成'); } }
