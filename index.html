@@ -274,6 +274,14 @@ tfoot td{font-weight:700;background:var(--sunk)}
 .ov-sec{display:flex;align-items:center;gap:10px;flex-wrap:wrap;font-size:12px;font-weight:700;letter-spacing:.08em;color:var(--muted)}
 .ov-g{font-weight:400;letter-spacing:0}
 .ov-empty{color:var(--muted);font-size:13px;padding:8px 0}
+.an{display:flex;flex-direction:column;gap:14px}
+.an-note{margin:0 0 8px;color:var(--muted);font-size:12px;line-height:1.65}
+.an-bar{display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin:0 0 10px}
+.an-bar label{font-size:13px;color:var(--muted)}
+.an-bar select{background:var(--surface);border:1px solid var(--line);border-radius:var(--r);padding:6px 10px;max-width:100%}
+.an h3{margin:0 0 6px;font-size:13px;font-weight:700}
+.an .subnote{margin:6px 0 0;color:var(--muted);font-size:12px;line-height:1.6}
+.oc .det{grid-column:1/-1;min-width:0}
 @media (max-width:760px){.ov-wrap{grid-template-columns:1fr}}
 .panel .ov-wrap{grid-template-columns:1fr}
 .panel .ov-top svg{width:150px;height:150px}
@@ -835,6 +843,100 @@ $('#mine').addEventListener('click',async e=>{
   if(cv){ const o=mineDocs.find(x=>x.oid===cv.dataset.csv); try{ await saveCSV(`SDR_FW27_${o.store}_${o.oid}.csv`,[CSV_HEAD,...csvRows(o)]); }catch(err){ if(err?.code!=='declined'&&err?.code!=='cancelled') msg('#mine-msg','err',err.message||'下載未完成'); } }
 });
 
+// ---------- 下單分析：款色、尺寸、大類、系列 ----------
+// 款色＝款號＋顏色（商品資料一列、一個色碼）。尺寸＝款號＋顏色＋有下單的尺寸。
+const AN_GROUPS=[['服裝',['服裝-男','服裝-女']],['配件',['配件','球袋']],['鞋款',['鞋款']]];
+function anGroup(sheet){
+  const s=String(sheet||'');
+  for(const [g,ss] of AN_GROUPS) if(ss.includes(s)) return g;
+  if(/鞋/.test(s)) return '鞋款';
+  if(/服裝|衣/.test(s)) return '服裝';
+  if(/配|袋/.test(s)) return '配件';
+  return '其他';
+}
+function anSeries(it){
+  if(!it) return '找不到商品';
+  const m=String(it.series||'').match(/系列[：:]\s*([^\n]+)/);
+  if(m&&m[1].trim()) return m[1].trim();
+  const theme=String(it.theme||'').trim();
+  return theme||'未標系列';
+}
+function anItem(l){
+  if(l&&l.k&&BY[l.k]) return BY[l.k];
+  if(l&&l.sku){ const sku=String(l.sku); return ITEMS.find(i=>i.sku===sku&&(!l.sheet||i.sheet===l.sheet))||ITEMS.find(i=>i.sku===sku)||null; }
+  return null;
+}
+function analyzeLines(lines){
+  const colors=new Map();
+  for(const l of lines||[]){
+    const qty=Number(l.qty)||0; if(!(qty>0)) continue;
+    const it=anItem(l);
+    const style=it?it.style:(l.style||''), color=it?it.color:(l.color||''), sku=it?it.sku:(l.sku||'');
+    const ck=it?it.id:('x:'+style+'|'+color+'|'+sku);
+    const size=String(l.size||'');
+    let c=colors.get(ck);
+    if(!c){ c={sheet:it?it.sheet:(l.sheet||'其他'),series:anSeries(it),qty:0,amt:0,sizes:new Set()}; colors.set(ck,c); }
+    const price=Number(l.price!=null&&l.price!==''?l.price:(it&&it.price)||0);
+    c.qty+=qty; c.amt+=qty*price;
+    if(size) c.sizes.add(ck+'|'+size);
+  }
+  const bySheet=new Map(), bySeries=new Map(), byGroup=new Map();
+  const tot={colors:0,sizes:0,qty:0,amt:0};
+  const add=(map,key,c)=>{ let r=map.get(key); if(!r){ r={key,colors:0,sizes:0,qty:0,amt:0}; map.set(key,r); } r.colors++; r.sizes+=c.sizes.size; r.qty+=c.qty; r.amt+=c.amt; };
+  for(const c of colors.values()){
+    tot.colors++; tot.sizes+=c.sizes.size; tot.qty+=c.qty; tot.amt+=c.amt;
+    add(bySheet,c.sheet||'其他',c); add(bySeries,c.series,c); add(byGroup,anGroup(c.sheet),c);
+  }
+  return {tot,bySheet,bySeries,byGroup};
+}
+function anPct(n,d){ return d?(Math.round(n/d*1000)/10).toFixed(1)+'%':'–'; }
+function anGroupRows(a){
+  const rows=[], seen=new Set(AN_GROUPS.map(g=>g[0]));
+  for(const [g] of AN_GROUPS){ const r=a.byGroup.get(g); if(r) rows.push(r); }
+  for(const [k,r] of a.byGroup) if(!seen.has(k)) rows.push(r);
+  return rows;
+}
+function anSheetRows(a){
+  const rows=[], seen=new Set();
+  for(const sh of SHEETS){ const r=a.bySheet.get(sh); if(r){ rows.push(r); seen.add(sh); } }
+  for(const [s,r] of a.bySheet) if(!seen.has(s)) rows.push(r);
+  return rows;
+}
+function anSeriesRows(a){ return [...a.bySeries.values()].sort((x,y)=>y.amt-x.amt||y.qty-x.qty||String(x.key).localeCompare(String(y.key),'zh-Hant')); }
+function anTable(title,label,rows,tot,note){
+  if(!rows.length) return '';
+  const body=rows.map(r=>`<tr><td>${esc(r.key)}</td><td class="r num">${fmt(r.colors)}</td><td class="r num">${fmt(r.sizes)}</td><td class="r num">${fmt(r.qty)}</td><td class="r num">${fmt(r.amt)}</td><td class="r num">${anPct(r.qty,tot.qty)}</td><td class="r num">${anPct(r.amt,tot.amt)}</td></tr>`).join('');
+  return `<div><h3>${esc(title)}</h3><div class="tbl"><table><thead><tr><th>${esc(label)}</th><th class="r">款色</th><th class="r">尺寸數</th><th class="r">件數</th><th class="r">零售金額</th><th class="r">件數佔比</th><th class="r">金額佔比</th></tr></thead><tbody>${body}</tbody><tfoot><tr><td>合計</td><td class="r num">${fmt(tot.colors)}</td><td class="r num">${fmt(tot.sizes)}</td><td class="r num">${fmt(tot.qty)}</td><td class="r num">${fmt(tot.amt)}</td><td class="r num">100%</td><td class="r num">100%</td></tr></tfoot></table></div>${note?`<p class="subnote">${note}</p>`:''}</div>`;
+}
+function anTables(a,notes){
+  if(!a.tot.qty) return '';
+  return anTable('依大類','大類',anGroupRows(a),a.tot,notes?'服裝含男裝與女裝；配件含球袋。':'')
+    +anTable('依分頁','分頁',anSheetRows(a),a.tot,'')
+    +anTable('依系列','系列',anSeriesRows(a),a.tot,notes?'系列名稱來自商品資料的「系列：」，例如 Polos · Heritage。沒有標系列的款，改用主題名稱。':'');
+}
+function storeName(o){ return String(o.store||'').trim()||'未填店名'; }
+let anScope='all';
+function anAdminHTML(os){
+  const live=os.filter(o=>o.status!=='作廢'), voidN=os.length-live.length;
+  const stores=[...new Set(live.map(storeName))].sort((a,b)=>a.localeCompare(b,'zh-Hant'));
+  if(anScope!=='all'&&!stores.includes(anScope)) anScope='all';
+  const scoped=anScope==='all'?live:live.filter(o=>storeName(o)===anScope);
+  const a=analyzeLines(scoped.flatMap(o=>o.lines||[]));
+  const byStore=new Map();
+  for(const o of live){ const n=storeName(o); if(!byStore.has(n)) byStore.set(n,[]); byStore.get(n).push(o); }
+  const cust=[...byStore.entries()].map(([name,list])=>{ const x=analyzeLines(list.flatMap(o=>o.lines||[])); return {key:name,n:list.length,...x.tot}; }).sort((x,y)=>y.amt-x.amt||y.qty-x.qty||x.key.localeCompare(y.key,'zh-Hant'));
+  const qty=cust.reduce((t,r)=>t+r.qty,0), amt=cust.reduce((t,r)=>t+r.amt,0);
+  const custHTML=cust.length?`<div><h3>依經銷商</h3><div class="tbl"><table><thead><tr><th>經銷商</th><th class="r">訂單</th><th class="r">款色</th><th class="r">尺寸數</th><th class="r">件數</th><th class="r">零售金額</th><th class="r">件數佔比</th><th class="r">金額佔比</th></tr></thead><tbody>${cust.map(r=>`<tr><td>${esc(r.key)}</td><td class="r num">${r.n}</td><td class="r num">${fmt(r.colors)}</td><td class="r num">${fmt(r.sizes)}</td><td class="r num">${fmt(r.qty)}</td><td class="r num">${fmt(r.amt)}</td><td class="r num">${anPct(r.qty,qty)}</td><td class="r num">${anPct(r.amt,amt)}</td></tr>`).join('')}</tbody><tfoot><tr><td>合計</td><td class="r num">${cust.reduce((t,r)=>t+r.n,0)}</td><td class="r num">–</td><td class="r num">–</td><td class="r num">${fmt(qty)}</td><td class="r num">${fmt(amt)}</td><td class="r num">100%</td><td class="r num">100%</td></tr></tfoot></table></div><p class="subnote">同一款色若好幾家都有下，各家各算 1，所以款色和尺寸數不能把各家相加。全部一共幾款，看上面的大類合計。</p></div>`:'';
+  const note=`款色是有下單的款號加顏色，同一個色碼算 1。尺寸是再把有填數量的尺寸分開算，同一款色下了三個尺寸就計 3。上面的圓餅圖仍是性別和細品類的件數、金額；這裡補的是下了幾款，並依大類、分頁和系列分開。作廢訂單不計入。${voidN?`這次有 ${voidN} 張作廢，已排除。`:''}`;
+  const empty=!a.tot.qty?'<div class="ov-empty">這個範圍還沒有可計算的數量。</div>':'';
+  return `<p class="an-note">${note}</p><div class="an-bar"><label for="an-scope">看哪一家</label><select id="an-scope">${['all',...stores].map(s=>`<option value="${esc(s)}"${s===anScope?' selected':''}>${s==='all'?'全部':esc(s)}</option>`).join('')}</select><span class="sub">${scoped.length} 張訂單</span></div><div class="an">${empty}${anTables(a,true)}${custHTML}</div>`;
+}
+function orderAnalysisHTML(o){
+  const a=analyzeLines(o.lines||[]); if(!a.tot.qty) return '';
+  const chain=o.branches&&o.branches.length>1;
+  return `<div class="an">${chain?'<p class="subnote">整張訂單，各分店加在一起。同一款色若好幾家分店都有下，只算 1 款。</p>':''}${anTables(a,false)}</div>`;
+}
+
 // admin
 let adminUnsub=null, adminOrders={}, dealers=[];
 async function startAdmin(){
@@ -853,14 +955,17 @@ function orderDetailHTML(o){
   const SZ=['XXS','XS','S','M','L','XL','2XL','XXL','3XL','FREE SIZE'];
   const rank=z=>{ const i=SZ.indexOf(String(z).toUpperCase()); if(i>=0) return [0,i]; const n=parseFloat(z); return isNaN(n)?[2,0]:[1,n]; };
   const blocks=(o.branches&&o.branches.length)?o.branches.map(b=>({name:b.name,lines:(b.lines||[]).map(x=>{ const it=BY[x.k]||{}; return {...x,sheet:it.sheet,style:it.style,sku:it.sku,zh:it.zh||it.en,color:it.color,price:it.price||0}; })})):[{name:'',lines:o.lines||[]}];
-  return blocks.map(bk=>{
+  const body=blocks.map(bk=>{
     const g={}, ord=[], sizes=[];
     for(const l of bk.lines){ const key=l.k||(l.sku+'|'+l.color); if(!g[key]){ g[key]={l,q:{},qty:0}; ord.push(key); } g[key].q[l.size]=(g[key].q[l.size]||0)+l.qty; g[key].qty+=l.qty; if(!sizes.includes(l.size)) sizes.push(l.size); }
     sizes.sort((a,b)=>{ const x=rank(a),y=rank(b); return x[0]-y[0]||x[1]-y[1]; });
     ord.sort((a,b)=>SHEETS.indexOf(g[a].l.sheet)-SHEETS.indexOf(g[b].l.sheet));
     const tq=ord.reduce((t,k)=>t+g[k].qty,0), ta=ord.reduce((t,k)=>t+g[k].qty*(g[k].l.price||0),0);
-    return `${bk.name?`<div style="font-weight:700;margin:12px 0 6px">分店：${esc(bk.name)}</div>`:''}<div class="tbl" style="margin-top:10px"><table><thead><tr><th>分頁</th><th>品名</th><th>顏色</th>${sizes.map(z=>`<th class="r">${esc(z)}</th>`).join('')}<th class="r">件數</th><th class="r">零售金額</th></tr></thead><tbody>${ord.map(k=>{ const x=g[k], l=x.l; return `<tr><td>${esc(l.sheet)}</td><td>${esc(l.zh||l.en)}<div class="code">${esc(l.style)} ／ ${esc(l.sku)}</div></td><td>${esc(l.color)}</td>${sizes.map(z=>`<td class="r num">${x.q[z]||''}</td>`).join('')}<td class="r num"><b>${x.qty}</b></td><td class="r num">${fmt(x.qty*(l.price||0))}</td></tr>`; }).join('')}<tr><td colspan="3"><b>合計</b></td>${sizes.map(z=>`<td class="r num">${ord.reduce((t,k)=>t+(g[k].q[z]||0),0)||''}</td>`).join('')}<td class="r num"><b>${tq}</b></td><td class="r num"><b>${fmt(ta)}</b></td></tr></tbody></table></div>`;
+    const ba=bk.name?analyzeLines(bk.lines):null;
+    const head=bk.name?`<div style="font-weight:700;margin:12px 0 6px">分店：${esc(bk.name)}<span class="sub" style="font-weight:400">　${fmt(ba.tot.colors)} 款色、${fmt(ba.tot.sizes)} 尺寸、${fmt(ba.tot.qty)} 件、零售 ${fmt(ba.tot.amt)}</span></div>`:'';
+    return `${head}<div class="tbl" style="margin-top:10px"><table><thead><tr><th>分頁</th><th>品名</th><th>顏色</th>${sizes.map(z=>`<th class="r">${esc(z)}</th>`).join('')}<th class="r">件數</th><th class="r">零售金額</th></tr></thead><tbody>${ord.map(k=>{ const x=g[k], l=x.l; return `<tr><td>${esc(l.sheet)}</td><td>${esc(l.zh||l.en)}<div class="code">${esc(l.style)} ／ ${esc(l.sku)}</div></td><td>${esc(l.color)}</td>${sizes.map(z=>`<td class="r num">${x.q[z]||''}</td>`).join('')}<td class="r num"><b>${x.qty}</b></td><td class="r num">${fmt(x.qty*(l.price||0))}</td></tr>`; }).join('')}<tr><td colspan="3"><b>合計</b></td>${sizes.map(z=>`<td class="r num">${ord.reduce((t,k)=>t+(g[k].q[z]||0),0)||''}</td>`).join('')}<td class="r num"><b>${tq}</b></td><td class="r num"><b>${fmt(ta)}</b></td></tr></tbody></table></div>`;
   }).join('');
+  return `<div class="det">${orderAnalysisHTML(o)}${body}</div>`;
 }
 function allOrders(){ return Object.values(adminOrders).flat().sort((a,b)=>String(b.submittedAt).localeCompare(String(a.submittedAt))); }
 function renderAdmin(){
@@ -872,6 +977,8 @@ function renderAdmin(){
   box.innerHTML=`<div class="section-title" style="margin-top:0">訂單彙整</div>
   <div class="kpis"><div class="kpi"><small>訂單</small><b>${T.orders}</b></div><div class="kpi"><small>經銷商</small><b>${T.stores}</b></div><div class="kpi"><small>總件數</small><b>${fmt(T.qty)}</b></div><div class="kpi"><small>零售金額 TWD</small><b>${fmt(T.amt)}</b></div></div>
   <div style="margin-top:12px">${overviewHTML(os.flatMap(o=>o.lines||[]))}</div>
+  <div class="section-title">下單分析</div>
+  ${anAdminHTML(os)}
   <div style="display:flex;gap:8px;margin-top:12px;flex-wrap:wrap"><button class="btn pri" id="a-handoff" ${os.length?'':'disabled'}>一鍵統整交單</button><button class="btn" id="a-csv-all" ${os.length?'':'disabled'}>下載全部明細 CSV</button><button class="btn" id="a-csv-sku" ${os.length?'':'disabled'}>下載款色彙總 CSV</button></div>
   <div id="admin-msg" style="margin-top:10px"></div>
   <div class="section-title">各經銷商訂單</div>
@@ -880,6 +987,7 @@ function renderAdmin(){
   $('#a-handoff').onclick=async()=>{ const b=$('#a-handoff'); b.disabled=true; b.textContent='讀取最新訂單…'; try{ let use=os; if(window.SDR_ADMIN&&window.SDR_ADMIN.list){ use=await window.SDR_ADMIN.list(); } const bad=handoffCheck(use); if(bad.length){ throw new Error('有訂單的明細還沒完整寫進試算表，交單檔先不產生，請等 1～2 分鐘後再按一次：'+bad.join('、')); } b.textContent='整理中…'; const out=await exportHandoff(use); if(out) msg('#admin-msg','ok','交單檔已下載：'+out.map(([t,q,n])=>`${t} ${fmt(q)} 件${n?'（'+n+' 店）':''}`).join('、')+'。'); }catch(e){ msg('#admin-msg','err',e.message||'交單檔產生失敗'); } b.disabled=false; b.textContent='一鍵統整交單'; };
   $('#a-csv-all').onclick=async()=>{ try{ await saveCSV('SDR_FW27_全部訂單明細.csv',[CSV_HEAD,...os.flatMap(csvRows)]); }catch(e){ if(e?.code!=='declined'&&e?.code!=='cancelled') msg('#admin-msg','err',e.message||'下載未完成'); } };
   $('#a-csv-sku').onclick=async()=>{ const sizesAll=[]; aggRows.forEach(a=>Object.keys(a.sz).forEach(s=>{ if(!sizesAll.includes(s)) sizesAll.push(s); })); try{ await saveCSV('SDR_FW27_款色彙總.csv',[['分頁','月份','款號','色碼 SKU','英文品名','中文品名','顏色','店數','件數','台灣建議售價','零售金額',...sizesAll],...aggRows.map(a=>[a.l.sheet,a.l.mon,a.l.style,a.l.sku,a.l.en,a.l.zh,a.l.color,a.stores.size,a.qty,a.l.price,a.qty*a.l.price,...sizesAll.map(s=>a.sz[s]||'')])]); }catch(e){ if(e?.code!=='declined'&&e?.code!=='cancelled') msg('#admin-msg','err',e.message||'下載未完成'); } };
+  const scope=$('#an-scope'); if(scope) scope.onchange=()=>{ anScope=scope.value; renderAdmin(); };
 }
 $('#admin').addEventListener('click',async e=>{
   const c=e.target.closest('[data-acsv]'); const ok=e.target.closest('[data-ok]'); const ax=e.target.closest('[data-axls]');
@@ -927,13 +1035,16 @@ async function buildBook(qty, meta){
     const sizes=sheetSizes(sh);
     const ws=wb.addWorksheet(sh,{views:[{state:'frozen',xSplit:4,ySplit:4,showGridLines:false}]});
     const head=[...FIXED,...sizes,'訂購總數','零售金額 TWD'];
-    const cTot=FIXED.length+sizes.length+1, cAmt=cTot+1, cPrice=FIXED.indexOf('台灣建議售價')+1, cS0=FIXED.length+1, cS1=FIXED.length+sizes.length;
+    const cTot=FIXED.length+sizes.length+1, cAmt=cTot+1, cPrice=FIXED.indexOf('台灣建議售價')+1, cS0=FIXED.length+1, cS1=FIXED.length+sizes.length, cSer=cAmt+1, cSzN=cAmt+2;
     ws.getCell('B1').value=`SUN DAY RED FW27 訂單本｜${sh}`; ws.getCell('B1').font={name:'Arial',size:16,bold:true,color:{argb:'FF610E0E'}};
     ws.getCell('B2').value='黃色格填訂購數量，灰色為無此尺寸。請勿更動欄位順序與隱藏的 A 欄（KEY），以便重新匯入下單頁。'; ws.getCell('B2').font={...F,color:{argb:'FF6B6B70'}};
     const hr=ws.getRow(4); head.forEach((h,k)=>{ const c=hr.getCell(k+1); c.value=h; c.font={name:'Arial',size:10,bold:true,color:{argb:'FFFFFFFF'}}; c.fill=fill('FF610E0E'); c.alignment={horizontal:'center',vertical:'middle',wrapText:true}; c.border=border; }); hr.height=30;
     const widths={'KEY':10,'No.':5,'娃娃圖':14,'實體圖':14,'月份':7,'主題':16,'Drop':9,'品類':11,'性別':6,'款號':12,'中文品名':22,'英文品名':24,'顏色':16,'色號':7,'色碼 SKU':10,'Icon':12,'布料':22,'系列／尺寸':22,'商品概述':34,'商品細節':40,'材質與科技':26,'備註':18,'預計上市':10,'台灣建議售價':10};
     head.forEach((h,k)=>{ ws.getColumn(k+1).width = widths[h] || (k+1===cTot?9:k+1===cAmt?13:6.5); });
-    ws.getColumn(1).hidden=true;
+    ws.getColumn(1).hidden=true; ws.getColumn(cSer).hidden=true; ws.getColumn(cSzN).hidden=true;
+    const hSer=hr.getCell(cSer), hSz=hr.getCell(cSzN);
+    hSer.value='系列鍵'; hSz.value='尺寸格數';
+    [hSer,hSz].forEach(c=>{ c.font={name:'Arial',size:10,bold:true,color:{argb:'FFFFFFFF'}}; c.fill=fill('FF610E0E'); c.alignment={horizontal:'center',vertical:'middle'}; });
     let r=5;
     for(const it of its){
       const row=ws.getRow(r); const q=qty[it.id]||{};
@@ -945,6 +1056,8 @@ async function buildBook(qty, meta){
         else c.fill=fill('FFD9D9D9'); });
       const t=row.getCell(cTot); t.value={formula:`SUM(${colL(cS0)}${r}:${colL(cS1)}${r})`}; t.font={...F,bold:true}; t.border=border; t.alignment={horizontal:'center',vertical:'middle'};
       const a=row.getCell(cAmt); a.value={formula:`IF(${colL(cPrice)}${r}="","",${colL(cPrice)}${r}*${colL(cTot)}${r})`}; a.numFmt='#,##0'; a.font=F; a.border=border; a.alignment={vertical:'middle'};
+      row.getCell(cSer).value=anSeries(it);
+      row.getCell(cSzN).value={formula:`COUNTIF(${colL(cS0)}${r}:${colL(cS1)}${r},">0")`};
       row.height=120;
       if(meta.images!==false){ for(const [col,h] of [[2,it.doll],[3,(it.photos||[])[0]]]){ if(!h||!IMG[h]) continue;
         if(!imgCache[h]) imgCache[h]={id:wb.addImage({base64:IMG[h],extension:'jpeg'}),dims:await imgDims(IMG[h])};
@@ -956,7 +1069,7 @@ async function buildBook(qty, meta){
     for(let c=cS0;c<=cAmt;c++){ const cell=tr.getCell(c); cell.value={formula:`SUM(${colL(c)}5:${colL(c)}${r-1})`}; cell.numFmt='#,##0'; }
     for(let c=2;c<=cAmt;c++){ const cell=tr.getCell(c); cell.font={...F,bold:true}; cell.fill=fill('FFEBEBE8'); cell.border=border; }
     tr.height=20;
-    totals[sh]={last:r-1,tot:`${colL(cTot)}${r}`,amt:`${colL(cAmt)}${r}`,totCol:colL(cTot)};
+    totals[sh]={last:r-1,tot:`${colL(cTot)}${r}`,amt:`${colL(cAmt)}${r}`,totCol:colL(cTot),amtCol:colL(cAmt),serCol:colL(cSer),szNCol:colL(cSzN)};
   }
   let brInfo=null;
   if(meta._mode==='chain'&&meta.branches&&meta.branches.length){
@@ -979,20 +1092,46 @@ async function buildBook(qty, meta){
     brInfo={B,c0,cP,last:r-1,tot:r};
   }
   // 總表
-  sum.getColumn(1).width=18; sum.getColumn(2).width=34; sum.getColumn(3).width=12; sum.getColumn(4).width=16;
+  const qn=sh=>`'${String(sh).replace(/'/g,"''")}'`;
+  const xq=s=>'"'+String(s).replace(/"/g,'""')+'"';
+  const serF=(kind,name)=>{ const parts=[]; for(const sh of SHEETS){ const t=totals[sh]; if(!t) continue; const q=qn(sh), key=`${q}!${t.serCol}5:${t.serCol}${t.last}`, lit=xq(name);
+    if(kind==='colors') parts.push(`COUNTIFS(${key},${lit},${q}!${t.totCol}5:${t.totCol}${t.last},">0")`);
+    else if(kind==='sizes') parts.push(`SUMIF(${key},${lit},${q}!${t.szNCol}5:${t.szNCol}${t.last})`);
+    else if(kind==='qty') parts.push(`SUMIF(${key},${lit},${q}!${t.totCol}5:${t.totCol}${t.last})`);
+    else parts.push(`SUMIF(${key},${lit},${q}!${t.amtCol}5:${t.amtCol}${t.last})`); } return parts.join('+')||'0'; };
+  const paintHead=(row,labels)=>{ labels.forEach((h,k)=>{ const c=sum.getRow(row).getCell(k+1); c.value=h; c.font={name:'Arial',size:10,bold:true,color:{argb:'FFFFFFFF'}}; c.fill=fill('FF610E0E'); c.border=border; c.alignment={horizontal:'center',vertical:'middle',wrapText:true}; }); sum.getRow(row).height=22; };
+  const paintNum=(row,n)=>{ for(let c=1;c<=n;c++){ const cell=row.getCell(c); cell.font=F; cell.border=border; if(c>1) cell.numFmt='#,##0'; } };
+  const paintTot=(row,from,n)=>{ row.getCell(1).font={...F,bold:true}; row.getCell(1).fill=fill('FFEBEBE8'); row.getCell(1).border=border; for(let c=2;c<=n;c++){ const cell=row.getCell(c); cell.value={formula:`SUM(${colL(c)}${from}:${colL(c)}${row.number-1})`}; cell.numFmt='#,##0'; cell.font={...F,bold:true}; cell.fill=fill('FFEBEBE8'); cell.border=border; } };
+  sum.getColumn(1).width=36; sum.getColumn(2).width=34; sum.getColumn(3).width=12; sum.getColumn(4).width=14; sum.getColumn(5).width=16;
   sum.getCell('A1').value='SUN DAY RED FW27 訂單總表'; sum.getCell('A1').font={name:'Arial',size:16,bold:true,color:{argb:'FF610E0E'}};
   const info=[['經銷商／店名',meta.store],['聯絡人',meta.contact],['電話',meta.phone],['Email',meta.email],['訂單備註',meta.note],['訂單編號',meta.oid||'（尚未送出）'],['匯出時間',fmtTime(new Date().toISOString())]];
   info.forEach(([k,v],n)=>{ const r=3+n; const a=sum.getCell(`A${r}`), b=sum.getCell(`B${r}`); a.value=k; b.value=v||''; a.font={...F,bold:true}; b.font=F; a.fill=fill('FFEBEBE8'); a.border=border; b.border=border; });
-  const H0=12; ['分頁','款色數','訂購總數','零售金額 TWD'].forEach((h,k)=>{ const c=sum.getRow(H0).getCell(k+1); c.value=h; c.font={name:'Arial',size:10,bold:true,color:{argb:'FFFFFFFF'}}; c.fill=fill('FF610E0E'); c.border=border; c.alignment={horizontal:'center'}; });
+  const H0=12; paintHead(H0,['分頁','款色數','尺寸數','訂購總數','零售金額 TWD']);
   sum.getCell(`A${H0-1}`).value='各分頁下單'; sum.getCell(`A${H0-1}`).font={...F,bold:true,size:12};
-  let r=H0+1;
-  for(const sh of SHEETS){ const t=totals[sh]; if(!t) continue; const q=`'${sh}'`;
-    const row=sum.getRow(r); row.getCell(1).value=sh; row.getCell(2).value={formula:`COUNTIF(${q}!${t.totCol}5:${t.totCol}${t.last},">0")`}; row.getCell(3).value={formula:`${q}!${t.tot}`}; row.getCell(4).value={formula:`${q}!${t.amt}`};
-    for(let c=1;c<=4;c++){ const cell=row.getCell(c); cell.font=F; cell.border=border; if(c>1) cell.numFmt='#,##0'; } r++; }
-  const tr=sum.getRow(r); tr.getCell(1).value='合計'; [2,3,4].forEach(c=>{ tr.getCell(c).value={formula:`SUM(${colL(c)}${H0+1}:${colL(c)}${r-1})`}; tr.getCell(c).numFmt='#,##0'; });
-  for(let c=1;c<=4;c++){ const cell=tr.getCell(c); cell.font={...F,bold:true}; cell.fill=fill('FFEBEBE8'); cell.border=border; }
-  sum.getCell(`A${r+2}`).value='在下單頁按「匯入 Excel 訂單本」選這個檔案，就能把數量帶回線上下單。'; sum.getCell(`A${r+2}`).font={...F,color:{argb:'FF6B6B70'}};
-  if(brInfo){ let y=r+4; sum.getCell(`A${y}`).value='各分店下單'; sum.getCell(`A${y}`).font={...F,bold:true,size:12}; y++;
+  const sheetAt={}; let r=H0+1;
+  for(const sh of SHEETS){ const t=totals[sh]; if(!t) continue; const q=qn(sh); sheetAt[sh]=r;
+    const row=sum.getRow(r); row.getCell(1).value=sh; row.getCell(2).value={formula:`COUNTIF(${q}!${t.totCol}5:${t.totCol}${t.last},">0")`}; row.getCell(3).value={formula:`SUM(${q}!${t.szNCol}5:${t.szNCol}${t.last})`}; row.getCell(4).value={formula:`${q}!${t.tot}`}; row.getCell(5).value={formula:`${q}!${t.amt}`};
+    paintNum(row,5); r++; }
+  const tr=sum.getRow(r); tr.getCell(1).value='合計'; paintTot(tr,H0+1,5); r+=2;
+  sum.getCell(`A${r}`).value='依大類'; sum.getCell(`A${r}`).font={...F,bold:true,size:12}; r++;
+  paintHead(r,['大類','款色數','尺寸數','訂購總數','零售金額 TWD']); r++;
+  const g0=r;
+  for(const [g,sheets] of AN_GROUPS){ const rows=sheets.map(s=>sheetAt[s]).filter(Boolean); const row=sum.getRow(r); row.getCell(1).value=g;
+    [2,3,4,5].forEach(c=>{ row.getCell(c).value=rows.length?{formula:rows.map(n=>colL(c)+n).join('+')}:0; }); paintNum(row,5); r++; }
+  const gtr=sum.getRow(r); gtr.getCell(1).value='合計'; paintTot(gtr,g0,5); r+=2;
+  sum.mergeCells(r,1,r,5); sum.getCell(r,1).value='服裝含男裝與女裝，配件含球袋。款色是款號加顏色；尺寸是款號、顏色加有下單的尺寸。改黃色數量格後，分頁和大類會跟著重算。'; sum.getCell(r,1).font={...F,color:{argb:'FF6B6B70'}}; sum.getCell(r,1).alignment={wrapText:true,vertical:'top'}; sum.getRow(r).height=32; r+=2;
+  sum.getCell(`A${r}`).value='依系列'; sum.getCell(`A${r}`).font={...F,bold:true,size:12}; r++;
+  paintHead(r,['系列','款色數','尺寸數','訂購總數','零售金額 TWD']); r++;
+  const seriesAmt=new Map();
+  for(const it of ITEMS){ const q=qty[it.id]; if(!q) continue; let n=0, amt=0; for(const z in q){ const v=Number(q[z])||0; if(v>0){ n+=v; amt+=v*(it.price||0); } } if(!n) continue; const name=anSeries(it); const cur=seriesAmt.get(name)||{name,amt:0,qty:0}; cur.amt+=amt; cur.qty+=n; seriesAmt.set(name,cur); }
+  const seriesNames=[...seriesAmt.values()].sort((a,b)=>b.amt-a.amt||b.qty-a.qty||a.name.localeCompare(b.name,'zh-Hant')).map(x=>x.name);
+  if(!seriesNames.length){ sum.getCell(r,1).value='這份訂單本還沒有數量。填了數量後重新匯出，就會列出有下單的系列。'; sum.getCell(r,1).font={...F,color:{argb:'FF6B6B70'}}; r++; }
+  else { const s0=r; for(const name of seriesNames){ const row=sum.getRow(r); row.getCell(1).value=name; row.getCell(2).value={formula:serF('colors',name)}; row.getCell(3).value={formula:serF('sizes',name)}; row.getCell(4).value={formula:serF('qty',name)}; row.getCell(5).value={formula:serF('amt',name)}; paintNum(row,5); r++; }
+    const str=sum.getRow(r); str.getCell(1).value='合計'; paintTot(str,s0,5); r++; }
+  r++;
+  sum.mergeCells(r,1,r,5); sum.getCell(r,1).value='系列名稱來自商品資料的「系列：」，例如 Polos · Heritage。沒有標系列的款，改用主題名稱。改數量後，已列出的系列會重算；本來沒下、這次才開始下的系列，要重新匯出才會出現。'; sum.getCell(r,1).font={...F,color:{argb:'FF6B6B70'}}; sum.getCell(r,1).alignment={wrapText:true,vertical:'top'}; sum.getRow(r).height=36; r+=2;
+  sum.getCell(`A${r}`).value='在下單頁按「匯入 Excel 訂單本」選這個檔案，就能把數量帶回線上下單。'; sum.getCell(`A${r}`).font={...F,color:{argb:'FF6B6B70'}};
+  if(brInfo){ let y=r+2; sum.getCell(`A${y}`).value='各分店下單'; sum.getCell(`A${y}`).font={...F,bold:true,size:12}; y++;
     ['分店','訂購總數','零售金額 TWD'].forEach((h,k)=>{ const c=sum.getRow(y).getCell(k+1); c.value=h; c.font={name:'Arial',size:10,bold:true,color:{argb:'FFFFFFFF'}}; c.fill=fill('FF610E0E'); c.border=border; c.alignment={horizontal:'center'}; }); y++;
     brInfo.B.forEach((b,k)=>{ const col=colL(brInfo.c0+k); const P=colL(brInfo.cP); const row=sum.getRow(y); row.getCell(1).value=b.name; row.getCell(2).value={formula:`'分店配貨'!${col}${brInfo.tot}`}; row.getCell(3).value={formula:`SUMPRODUCT('分店配貨'!${col}5:${col}${Math.max(5,brInfo.last)},'分店配貨'!${P}5:${P}${Math.max(5,brInfo.last)})`}; for(let c=1;c<=3;c++){ const cell=row.getCell(c); cell.font=F; cell.border=border; if(c>1) cell.numFmt='#,##0'; } y++; }); }
   return wb;
